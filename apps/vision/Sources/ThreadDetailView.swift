@@ -910,6 +910,7 @@ struct ThreadDetailView: View {
     @State private var followsTranscriptBottom = true
     @State private var transcriptIsAtBottom = true
     @State private var showsScriptOutput = false
+    @State private var checkedInProjectScripts: [ProjectScript] = []
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -932,6 +933,15 @@ struct ThreadDetailView: View {
         }
         .navigationTitle("")
         .task { await model.start(using: appModel) }
+        .task(id: projectScriptLookupKey) {
+            guard let activeWorktreeRoot else {
+                checkedInProjectScripts = []
+                return
+            }
+            checkedInProjectScripts = await appModel.checkedInProjectScripts(
+                cwd: activeWorktreeRoot
+            )
+        }
         .onChange(of: model.isDictating) {
             if !model.isDictating, model.draft != dictationBaseline {
                 prefersHardwareEditor = true
@@ -1409,10 +1419,25 @@ struct ThreadDetailView: View {
     }
 
     private var deployScripts: [ProjectScript] {
-        (activeProject?.scripts ?? []).filter {
+        checkedInProjectScripts.filter {
             !$0.runOnWorktreeCreate
                 && $0.name.localizedCaseInsensitiveContains("deploy")
         }
+    }
+
+    private var activeWorktreeRoot: String? {
+        guard let activeProject else { return nil }
+        return model.thread?.worktreePath ?? activeProject.workspaceRoot
+    }
+
+    private var projectScriptLookupKey: String {
+        guard let activeWorktreeRoot else { return "\(model.threadID):pending" }
+        let latestTurn = model.thread?.latestTurn
+        return [
+            activeWorktreeRoot,
+            latestTurn?.turnId ?? "no-turn",
+            latestTurn?.completedAt ?? "active",
+        ].joined(separator: ":")
     }
 
     private var primaryDeployScript: ProjectScript? {

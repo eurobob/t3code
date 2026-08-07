@@ -139,12 +139,15 @@ from the bottom; content and voice-dock growth do not expose it during follow.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
 
-Threads whose project advertises deploy scripts now show a direct Deploy action
-in the task header, with additional deploy variants in its adjacent menu. The
-action runs the selected project script in that thread's worktree through the
-existing terminal RPCs and presents bounded live output plus the command's real
-exit status. The terminal subscription is established before the command is
-written, so immediate guard failures are not lost.
+Threads whose active worktree's checked-in `t3.json` advertises deploy scripts
+show a direct Deploy action in the task header, with additional deploy variants
+in its adjacent menu. This does not use the mutable project-actions list and
+requires no import step: the client reads the file from `thread.worktreePath`
+(falling back to the project root) and supports its JSONC syntax directly. The
+action runs the selected command in that same worktree through the existing
+terminal RPCs and presents bounded live output plus the command's real exit
+status. The terminal subscription is established before the command is written,
+so immediate guard failures are not lost.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
