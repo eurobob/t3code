@@ -625,22 +625,6 @@ private enum TranscriptEntry: Identifiable {
     }
 }
 
-private struct TranscriptBottomPositionPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private struct TranscriptViewportHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 private struct VoiceDockHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -663,10 +647,7 @@ struct ThreadDetailView: View {
     @State private var dictationBaseline = ""
     @State private var microphoneHovered = false
     @State private var voiceDockHeight: CGFloat = 0
-    @State private var transcriptBottomPosition: CGFloat = 0
-    @State private var transcriptViewportHeight: CGFloat = 0
     @State private var followsTranscriptBottom = true
-    @State private var isManuallyScrolling = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -739,46 +720,13 @@ struct ThreadDetailView: View {
                         Color.clear
                             .frame(height: 12)
                             .id(transcriptBottomID)
-                            .background {
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: TranscriptBottomPositionPreferenceKey.self,
-                                        value: geometry.frame(
-                                            in: .named(transcriptCoordinateSpace)
-                                        ).maxY
-                                    )
-                                }
-                            }
                     }
                     .padding(20)
                 }
-                .coordinateSpace(name: transcriptCoordinateSpace)
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: TranscriptViewportHeightPreferenceKey.self,
-                            value: geometry.size.height
-                        )
-                    }
-                }
-                .onPreferenceChange(TranscriptBottomPositionPreferenceKey.self) { position in
-                    transcriptBottomPosition = position
-                    if !isManuallyScrolling, isTranscriptNearBottom {
-                        followsTranscriptBottom = true
-                    }
-                }
-                .onPreferenceChange(TranscriptViewportHeightPreferenceKey.self) { height in
-                    transcriptViewportHeight = height
-                }
                 .simultaneousGesture(
-                    DragGesture(minimumDistance: 4)
+                    DragGesture(minimumDistance: 1)
                         .onChanged { _ in
-                            isManuallyScrolling = true
                             followsTranscriptBottom = false
-                        }
-                        .onEnded { _ in
-                            isManuallyScrolling = false
-                            followsTranscriptBottom = isTranscriptNearBottom
                         }
                 )
                 .onChange(of: model.transcriptRevision) {
@@ -1067,14 +1015,6 @@ struct ThreadDetailView: View {
 
     private var transcriptBottomID: String {
         "\(model.threadID)-transcript-bottom"
-    }
-
-    private var transcriptCoordinateSpace: String {
-        "\(model.threadID)-transcript-scroll"
-    }
-
-    private var isTranscriptNearBottom: Bool {
-        transcriptBottomPosition <= transcriptViewportHeight + 80
     }
 
     private var transcriptEntries: [TranscriptEntry] {
