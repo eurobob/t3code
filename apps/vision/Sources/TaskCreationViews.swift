@@ -47,7 +47,7 @@ struct NewTaskView: View {
         guard !option.optionDescriptors.isEmpty else {
             return baseSelection(for: option)
         }
-        let selections = option.optionDescriptors.compactMap { descriptor in
+        let selections: [ModelSelection.OptionSelection] = option.optionDescriptors.compactMap { descriptor in
             switch descriptor {
             case let .select(value):
                 guard let selected = stringOptions[value.id], !selected.isEmpty else {
