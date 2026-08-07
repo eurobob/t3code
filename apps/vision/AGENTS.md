@@ -83,13 +83,19 @@ collapses before dispatch completes; a failed dispatch restores the draft and
 reopens the appropriate editor. The transcript merges messages with compact
 tool, approval, and error activities and keeps a static ellipsis working row
 visible from local send through provider start. Tool start/completion pairs are
-deduplicated. Sidebar status is intentionally quiet when idle: only working,
-needs-you, error, and a subdued completed state are shown. The microphone uses
-the native circular lift hover effect, and Send is a larger blue capsule.
+deduplicated. Sidebar working, needs-you, error, updated, ready, and completed
+states use one consistent pill language.
+The locally persisted Updated state compares the latest terminal turn state
+with what was last viewed, and clears while that task is open. Sidebar rows use
+one custom selection background instead of stacking List selection and
+NavigationLink focus chrome. The microphone uses the native circular lift hover
+effect, and Send is a larger blue capsule.
 Voice-dock height changes scroll the transcript bottom into view so dictation
-growth moves the latest bubbles above the controls. Successful sends do not
-show a redundant confirmation. Stop and dictation Cancel are solid red/white
-buttons, and activity rows with server-projected detail can expand to reveal it.
+growth moves the latest bubbles above the controls; the scroll waits one layout
+yield so it uses the new viewport. Successful sends do not show a redundant
+confirmation. Stop is present only while the live thread reports a running turn,
+and it and dictation Cancel are solid red/white buttons. Activity rows with
+server-projected detail can expand to reveal it.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -102,7 +108,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `2db95619`.
+most recently at product commit `4653a5c1`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
