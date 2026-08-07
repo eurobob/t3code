@@ -57,16 +57,17 @@ xcodebuild -project T3Vision.xcodeproj -scheme T3Vision -configuration Release \
 Implemented: pairing to a server by URL with launch-time restoration, a compact
 task sidebar from `shellEvents`,
 live thread detail from `threadEvents`, sending turns, explicit interrupt,
-client-side steering, push-to-talk dictation, project and task creation, task
+client-side steering, tap-to-record dictation, project and task creation, task
 organization, and one data-driven spatial window per thread.
 
 The task sidebar is flat by default, can optionally group by project, and keeps
 project names subordinate as row pretitles or inert section headers. New-task
 creation stays in the detail pane and carries an exact project preselection.
 Provider-advertised model options such as reasoning effort are sent through the
-real `ModelSelection` option surface. The task composer is an opaque,
-layout-reserved voice dock: dictation is primary, manual text is opt-in, and it
-never overlays the transcript.
+real `ModelSelection` option surface. The task composer is a layout-reserved
+system-material voice dock: dictation is primary, manual text is opt-in, and it
+never overlays the transcript. Recording continues after one tap and stops on
+the next; finalized dictation remains editable and can be cleared before send.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -81,7 +82,7 @@ The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
 most recently at product commit `36c0bac0`.
 It still needs a hands-on interaction pass, especially for the Speech framework
-capture path, pinch-and-hold gesture, pairing restoration, and multi-window
+capture path, tap target, pairing restoration, and multi-window
 restoration.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
@@ -151,9 +152,9 @@ Read it before designing this one. The important parts:
 - Cancel rolls back only if the draft still ends with exactly what was appended,
   so a mid-dictation edit is never eaten.
 
-On visionOS the natural gesture is gaze plus pinch-and-hold. The voice dock must
-occupy reserved layout space and remain visually opaque enough that transcript
-content never competes with it.
+On visionOS dictation is tap once to start and tap again to stop; do not make the
+user hold a pinch for the whole utterance. The voice dock must occupy reserved
+layout space so transcript content never competes with it.
 
 ## Conventions
 
