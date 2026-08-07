@@ -1103,7 +1103,7 @@ private struct ActivityRow: View {
         if activity.tone == "error" { return "exclamationmark.triangle.fill" }
         if activity.tone == "approval" { return "hand.raised.fill" }
         if activity.kind == "tool.started" { return "ellipsis" }
-        switch activity.payload["itemType"]?.stringValue {
+        return switch activity.payload["itemType"]?.stringValue {
         case "command_execution": "terminal"
         case "file_change": "doc.badge.gearshape"
         case "mcp_tool_call": "wrench.and.screwdriver"
