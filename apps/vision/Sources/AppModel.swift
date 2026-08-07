@@ -2,6 +2,15 @@ import ClerkKit
 import Foundation
 import Observation
 
+struct VisionModelOption: Identifiable, Equatable {
+    let providerName: String
+    let modelName: String
+    let selection: ModelSelection
+
+    var id: String { "\(selection.instanceId):\(selection.model)" }
+    var label: String { "\(providerName) · \(modelName)" }
+}
+
 /// Owns the connection for the whole app.
 ///
 /// Deliberately thin: `T3ConnectController`, `EnvironmentRuntime` and `T3Client`
@@ -36,6 +45,9 @@ final class AppModel {
     private(set) var cloudEnvironments: [T3ConnectCloudEnvironment] = []
     private(set) var environment: Environment?
     private(set) var snapshot: OrchestrationShellSnapshot?
+    private(set) var archivedThreads: [OrchestrationThreadShell] = []
+    private(set) var serverConfig: ServerConfigSnapshot?
+    private(set) var threadOrder: [String] = []
 
     let connect = T3ConnectController()
 
@@ -52,6 +64,7 @@ final class AppModel {
     )
     private var client: T3Client?
     private var eventsTask: Task<Void, Never>?
+    private var configEventsTask: Task<Void, Never>?
 
     @ObservationIgnored
     private lazy var pairingService = PairingService(
@@ -72,6 +85,44 @@ final class AppModel {
     }
 
     var unavailableReason: String? { connect.unavailableReason }
+
+    var availableModels: [VisionModelOption] {
+        let configured = (serverConfig?.providers ?? []).flatMap { provider -> [VisionModelOption] in
+            guard provider.enabled,
+                  provider.installed,
+                  provider.status != "disabled",
+                  provider.status != "error",
+                  provider.auth.status != "unauthenticated",
+                  provider.availability != "unavailable" else { return [] }
+            let providerName = provider.displayName ?? provider.driver
+            return provider.models
+                .filter { $0.isLegacy != true }
+                .map { model in
+                    VisionModelOption(
+                        providerName: providerName,
+                        modelName: model.shortName ?? model.name,
+                        selection: ModelSelection(
+                            instanceId: provider.instanceId,
+                            model: model.slug
+                        )
+                    )
+                }
+        }
+        if serverConfig?.providers.isEmpty == false { return configured }
+
+        var seen: Set<String> = []
+        let selections = (snapshot?.projects.compactMap(\.defaultModelSelection) ?? [])
+            + (snapshot?.threads.map(\.modelSelection) ?? [])
+        return selections.compactMap { selection in
+            let id = "\(selection.instanceId):\(selection.model)"
+            guard seen.insert(id).inserted else { return nil }
+            return VisionModelOption(
+                providerName: selection.instanceId,
+                modelName: selection.model,
+                selection: selection
+            )
+        }
+    }
 
     var dictationVocabulary: [String] {
         let staticTerms = [
@@ -220,6 +271,11 @@ final class AppModel {
 
         do {
             snapshot = try await client.shellSnapshot()
+            archivedThreads = (try? await client.archivedShellSnapshot().threads) ?? []
+            serverConfig = try? await client.serverConfig()
+            threadOrder = UserDefaults.standard.stringArray(
+                forKey: threadOrderKey(environmentID: environment.id)
+            ) ?? []
             phase = .connected
         } catch {
             phase = .failed(error.localizedDescription)
@@ -234,13 +290,39 @@ final class AppModel {
         eventsTask = Task { [weak self] in
             let stream = await client.shellEvents()
             do {
-                for try await _ in stream {
+                for try await item in stream {
                     if Task.isCancelled { return }
                     guard let refreshed = try? await client.shellSnapshot() else { continue }
-                    await MainActor.run { self?.snapshot = refreshed }
+                    var archived: [OrchestrationThreadShell]?
+                    var restoredThreadID: String?
+                    if case .threadRemoved(_, _) = item {
+                        archived = try? await client.archivedShellSnapshot().threads
+                    } else if case let .threadUpserted(_, thread) = item {
+                        restoredThreadID = thread.id
+                    }
+                    await MainActor.run {
+                        self?.snapshot = refreshed
+                        if let archived { self?.archivedThreads = archived }
+                        if let restoredThreadID {
+                            self?.archivedThreads.removeAll { $0.id == restoredThreadID }
+                        }
+                    }
                 }
             } catch {
                 await MainActor.run { self?.phase = .failed(error.localizedDescription) }
+            }
+        }
+
+        configEventsTask?.cancel()
+        configEventsTask = Task { [weak self] in
+            do {
+                for try await item in await client.serverConfigEvents() {
+                    if Task.isCancelled { return }
+                    await MainActor.run { self?.applyServerConfigEvent(item) }
+                }
+            } catch {
+                // Creation keeps using the last catalog; reconnecting the Core
+                // subscription will refresh it when the socket returns.
             }
         }
     }
@@ -248,9 +330,14 @@ final class AppModel {
     func disconnect() async {
         eventsTask?.cancel()
         eventsTask = nil
+        configEventsTask?.cancel()
+        configEventsTask = nil
         await client?.disconnect()
         client = nil
         snapshot = nil
+        archivedThreads = []
+        serverConfig = nil
+        threadOrder = []
         environment = nil
         phase = account == nil ? .signedOut : .choosingEnvironment
     }
@@ -286,11 +373,134 @@ final class AppModel {
         return try await client.interrupt(threadID: threadID, turnID: turnID)
     }
 
+    func createThreadAndSend(
+        projectID: String,
+        title: String,
+        text: String,
+        model: ModelSelection,
+        runtimeMode: RuntimeMode,
+        interactionMode: InteractionMode
+    ) async throws -> String {
+        guard let client else { throw ClientError.notConnected }
+        let threadID = UUID().uuidString
+        _ = try await client.createThreadAndSend(
+            threadID: threadID,
+            projectID: projectID,
+            title: title,
+            text: text,
+            model: model,
+            runtimeMode: runtimeMode,
+            interactionMode: interactionMode
+        )
+        return threadID
+    }
+
+    func createProject(
+        title: String,
+        workspaceRoot: String,
+        defaultModel: ModelSelection?,
+        createWorkspaceRootIfMissing: Bool
+    ) async throws {
+        guard let client else { throw ClientError.notConnected }
+        _ = try await client.createProject(
+            title: title,
+            workspaceRoot: workspaceRoot,
+            defaultModel: defaultModel,
+            createWorkspaceRootIfMissing: createWorkspaceRootIfMissing
+        )
+    }
+
+    func pin(threadID: String, pinned: Bool) async throws {
+        guard let client else { throw ClientError.notConnected }
+        _ = try await client.pin(threadID: threadID, pinned: pinned)
+    }
+
+    func settle(threadID: String, settled: Bool) async throws {
+        guard let client else { throw ClientError.notConnected }
+        _ = try await client.settle(threadID: threadID, settled: settled)
+    }
+
+    func rename(threadID: String, title: String) async throws {
+        guard let client else { throw ClientError.notConnected }
+        _ = try await client.rename(threadID: threadID, title: title)
+    }
+
+    func archive(threadID: String, archived: Bool) async throws {
+        guard let client else { throw ClientError.notConnected }
+        _ = try await client.archive(threadID: threadID, archived: archived)
+        archivedThreads = (try? await client.archivedShellSnapshot().threads) ?? archivedThreads
+        snapshot = (try? await client.shellSnapshot()) ?? snapshot
+    }
+
+    func setThreadOrder(_ orderedIDs: [String]) {
+        let moved = Set(orderedIDs)
+        threadOrder.removeAll { moved.contains($0) }
+        threadOrder.append(contentsOf: orderedIDs)
+        guard let environment else { return }
+        UserDefaults.standard.set(
+            threadOrder,
+            forKey: threadOrderKey(environmentID: environment.id)
+        )
+    }
+
+    func defaultModel(for project: OrchestrationProject) -> ModelSelection? {
+        if let selection = project.defaultModelSelection,
+           isAvailable(selection) {
+            return selection
+        }
+        if let recent = snapshot?.threads
+            .filter({ $0.projectId == project.id })
+            .sorted(by: { $0.updatedAt > $1.updatedAt })
+            .first?.modelSelection,
+           isAvailable(recent) {
+            return recent
+        }
+        let providers = serverConfig?.providers ?? []
+        for provider in providers where provider.enabled && provider.installed {
+            if let model = provider.models.first(where: { $0.isDefault == true }) {
+                return ModelSelection(instanceId: provider.instanceId, model: model.slug)
+            }
+        }
+        return availableModels.first?.selection
+    }
+
     func signOut() async {
         await disconnect()
         await connect.signOut()
         account = nil
         cloudEnvironments = []
         phase = .signedOut
+    }
+
+    private func applyServerConfigEvent(_ event: ServerConfigStreamEvent) {
+        switch event {
+        case let .snapshot(config):
+            serverConfig = config
+        case let .providerStatuses(providers):
+            serverConfig = ServerConfigSnapshot(
+                providers: providers,
+                settings: serverConfig?.settings,
+                threadSnapshotPagination: serverConfig?.threadSnapshotPagination
+            )
+        case let .settingsUpdated(settings):
+            serverConfig = ServerConfigSnapshot(
+                providers: serverConfig?.providers ?? [],
+                settings: settings,
+                threadSnapshotPagination: serverConfig?.threadSnapshotPagination
+            )
+        case .unrelated:
+            break
+        }
+    }
+
+    private func threadOrderKey(environmentID: String) -> String {
+        "codes.t3.vision.thread-order.\(environmentID)"
+    }
+
+    private func isAvailable(_ selection: ModelSelection) -> Bool {
+        availableModels.contains {
+            $0.selection.instanceId == selection.instanceId
+                && $0.selection.model == selection.model
+        }
     }
 }
