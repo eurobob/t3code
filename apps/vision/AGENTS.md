@@ -89,10 +89,16 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `5bd0134b`.
+most recently at product commit `7527f41b`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
+
+A restored direct environment returning HTTP 502 is not an authentication
+failure. The pairing and Keychain credential are intact; 502/503/504 mean the
+saved reverse proxy is answering but cannot reach its T3 backend. On the current
+host, verify the live port and repair Tailscale Serve with root privileges rather
+than pairing again.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
 the redirect: `t3code-swiftui://clerk-callback` is not in the authorised
