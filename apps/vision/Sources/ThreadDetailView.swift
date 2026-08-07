@@ -721,7 +721,9 @@ struct ThreadDetailView: View {
                         proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                     }
                 }
-                .onChange(of: voiceDockHeight) {
+                .task(id: voiceDockHeight) {
+                    guard voiceDockHeight > 0 else { return }
+                    await Task.yield()
                     withAnimation(.easeOut(duration: 0.18)) {
                         proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                     }
@@ -771,16 +773,18 @@ struct ThreadDetailView: View {
                 }
             }
             Spacer()
-            Button(role: .destructive) {
-                model.interrupt(using: appModel)
-            } label: {
-                Label("Stop", systemImage: "stop.fill")
+            if model.isTurnRunning {
+                Button(role: .destructive) {
+                    model.interrupt(using: appModel)
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .foregroundStyle(.white)
+                .disabled(model.isBusy)
+                .accessibilityHint("Dispatches an interrupt using the latest known turn ID")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .foregroundStyle(.white)
-            .disabled(model.isBusy)
-            .accessibilityHint("Always dispatches an interrupt using the latest known turn ID")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)

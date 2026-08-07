@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 private enum ThreadFilter: String, CaseIterable, Hashable, Identifiable {
@@ -24,6 +25,9 @@ struct ThreadListView: View {
     @State private var renameTarget: OrchestrationThreadShell?
     @State private var renameDraft = ""
     @State private var actionError: String?
+    @State private var viewedTurnStates: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "vision.tasks.viewedTurnStates")
+            as? [String: String] ?? [:]
 
     private var projects: [OrchestrationProject] {
         (model.snapshot?.projects ?? [])
@@ -100,6 +104,12 @@ struct ThreadListView: View {
         } message: {
             Text(actionError ?? "Unknown error")
         }
+        .onChange(of: selection) {
+            markSelectedThreadViewed()
+        }
+        .onChange(of: selectedThreadStateSignature) {
+            markSelectedThreadViewed()
+        }
     }
 
     @ViewBuilder
@@ -115,7 +125,7 @@ struct ThreadListView: View {
         } else if visibleThreads.isEmpty {
             ContentUnavailableView.search(text: searchText)
         } else {
-            List(selection: $selection) {
+            List {
                 if groupByProject {
                     groupedTaskRows
                 } else {
@@ -175,10 +185,14 @@ struct ThreadListView: View {
         _ thread: OrchestrationThreadShell,
         projectTitle: String?
     ) -> some View {
-        NavigationLink(value: VisionSelection.thread(thread.id)) {
+        Button {
+            selection = .thread(thread.id)
+            markViewed(thread)
+        } label: {
             ThreadRow(
                 thread: thread,
                 projectTitle: projectTitle,
+                hasUnread: hasUnreadUpdate(thread),
                 onPin: {
                     perform {
                         try await model.pin(
@@ -209,6 +223,14 @@ struct ThreadListView: View {
                 }
             )
         }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .listRowBackground(
+            selection == .thread(thread.id)
+                ? Color.accentColor.opacity(0.12)
+                : Color.clear
+        )
     }
 
     @ViewBuilder
@@ -326,6 +348,44 @@ struct ThreadListView: View {
             }
         }
     }
+
+    private var selectedThreadStateSignature: String? {
+        guard case let .thread(threadID) = selection,
+              let thread = ((model.snapshot?.threads ?? []) + model.archivedThreads)
+                .first(where: { $0.id == threadID }),
+              let signature = turnStateSignature(thread) else { return nil }
+        return "\(threadID):\(signature)"
+    }
+
+    private func turnStateSignature(_ thread: OrchestrationThreadShell) -> String? {
+        guard let turn = thread.latestTurn else { return nil }
+        return "\(turn.turnId):\(turn.state)"
+    }
+
+    private func hasUnreadUpdate(_ thread: OrchestrationThreadShell) -> Bool {
+        guard let turn = thread.latestTurn,
+              turn.state == "completed" || turn.state == "interrupted" || turn.state == "error",
+              let signature = turnStateSignature(thread),
+              let viewed = viewedTurnStates[thread.id] else { return false }
+        return viewed != signature
+    }
+
+    private func markSelectedThreadViewed() {
+        guard case let .thread(threadID) = selection,
+              let thread = ((model.snapshot?.threads ?? []) + model.archivedThreads)
+                .first(where: { $0.id == threadID }) else { return }
+        markViewed(thread)
+    }
+
+    private func markViewed(_ thread: OrchestrationThreadShell) {
+        guard let signature = turnStateSignature(thread),
+              viewedTurnStates[thread.id] != signature else { return }
+        viewedTurnStates[thread.id] = signature
+        UserDefaults.standard.set(
+            viewedTurnStates,
+            forKey: "vision.tasks.viewedTurnStates"
+        )
+    }
 }
 
 private struct ThreadRow: View {
@@ -333,6 +393,7 @@ private struct ThreadRow: View {
 
     let thread: OrchestrationThreadShell
     let projectTitle: String?
+    let hasUnread: Bool
     let onPin: () -> Void
     let onSettle: () -> Void
     let onRename: () -> Void
@@ -358,28 +419,7 @@ private struct ThreadRow: View {
                 }
             }
 
-            HStack(spacing: 8) {
-                if thread.hasPendingApprovals || thread.hasPendingUserInput {
-                    Label("Needs you", systemImage: "exclamationmark")
-                        .foregroundStyle(.orange)
-                } else if let status = thread.session?.status,
-                          status == "starting" || status == "running" {
-                    HStack(spacing: 5) {
-                        Image(systemName: "ellipsis")
-                            .fontWeight(.semibold)
-                        Text("Working")
-                    }
-                    .foregroundStyle(.tint)
-                } else if thread.session?.status == "error" {
-                    Label("Error", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                } else if thread.settledAt != nil {
-                    Text("Complete")
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            ThreadStatusPill(presentation: statusPresentation)
         }
         .padding(.vertical, 3)
         .contextMenu {
@@ -415,5 +455,48 @@ private struct ThreadRow: View {
                 )
             }
         }
+    }
+
+    private var statusPresentation: ThreadStatusPresentation {
+        if thread.hasPendingApprovals || thread.hasPendingUserInput {
+            return .init(title: "Needs You", systemImage: "exclamationmark", color: .orange)
+        }
+        if let status = thread.session?.status,
+           status == "starting" || status == "running" {
+            return .init(title: "Working", systemImage: "ellipsis", color: .blue)
+        }
+        if thread.session?.status == "error" {
+            return .init(
+                title: "Error",
+                systemImage: "exclamationmark.triangle.fill",
+                color: .red
+            )
+        }
+        if hasUnread {
+            return .init(title: "Updated", systemImage: "circle.fill", color: .blue)
+        }
+        if thread.settledAt != nil {
+            return .init(title: "Complete", systemImage: "checkmark", color: .secondary)
+        }
+        return .init(title: "Ready", systemImage: "circle", color: .secondary)
+    }
+}
+
+private struct ThreadStatusPresentation {
+    let title: String
+    let systemImage: String
+    let color: Color
+}
+
+private struct ThreadStatusPill: View {
+    let presentation: ThreadStatusPresentation
+
+    var body: some View {
+        Label(presentation.title, systemImage: presentation.systemImage)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(presentation.color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(presentation.color.opacity(0.12), in: Capsule())
     }
 }
