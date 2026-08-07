@@ -54,10 +54,19 @@ xcodebuild -project T3Vision.xcodeproj -scheme T3Vision -configuration Release \
 
 ## Current state
 
-Implemented: pairing to a server by URL, a live task hub from `shellEvents`,
+Implemented: pairing to a server by URL with launch-time restoration, a compact
+task sidebar from `shellEvents`,
 live thread detail from `threadEvents`, sending turns, explicit interrupt,
 client-side steering, push-to-talk dictation, project and task creation, task
 organization, and one data-driven spatial window per thread.
+
+The task sidebar is flat by default, can optionally group by project, and keeps
+project names subordinate as row pretitles or inert section headers. New-task
+creation stays in the detail pane and carries an exact project preselection.
+Provider-advertised model options such as reasoning effort are sent through the
+real `ModelSelection` option surface. The task composer is an opaque,
+layout-reserved voice dock: dictation is primary, manual text is opt-in, and it
+never overlays the transcript.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -69,9 +78,11 @@ exactly match the dictated suffix. Task ordering is local to each paired Vision
 client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
-and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07.
+and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
+most recently at product commit `36c0bac0`.
 It still needs a hands-on interaction pass, especially for the Speech framework
-capture path, pinch-and-hold gesture, ornaments, and multi-window restoration.
+capture path, pinch-and-hold gesture, pairing restoration, and multi-window
+restoration.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
 the redirect: `t3code-swiftui://clerk-callback` is not in the authorised
@@ -118,9 +129,12 @@ gates its stop button on `session.status == "running" || "starting"` — check t
 real status values in `Core`, and do not silently no-op when the guard fails.
 A stop that does nothing and says nothing is the current bug.
 
-Open question worth answering with a real test: when interrupt is dispatched
-mid-tool-call, does the provider abort promptly or only after the tool returns?
-That decides whether steering feels instant or merely eventual.
+Source trace: T3 dispatches interruption immediately and does not deliberately
+wait for a tool to return. Codex calls app-server `turn/interrupt`; Claude's SDK
+interrupt explicitly yields `aborted_tools` mid-tool; OpenCode awaits
+`session.abort`; Cursor and Grok send ACP `session/cancel` and release the local
+prompt immediately. Actual wall-clock cancellation remains provider/tool
+dependent, so a timed mid-tool integration test is still required.
 
 ## Dictation
 
@@ -137,8 +151,9 @@ Read it before designing this one. The important parts:
 - Cancel rolls back only if the draft still ends with exactly what was appended,
   so a mid-dictation edit is never eaten.
 
-On visionOS the natural gesture is gaze plus pinch-and-hold, and the composer
-belongs in an ornament rather than the content plane.
+On visionOS the natural gesture is gaze plus pinch-and-hold. The voice dock must
+occupy reserved layout space and remain visually opaque enough that transcript
+content never competes with it.
 
 ## Conventions
 
