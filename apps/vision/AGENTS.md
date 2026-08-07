@@ -68,10 +68,10 @@ draft and volatile phrases only for the HUD; cancel preserves edits that do not
 exactly match the dictated suffix. Task ordering is local to each paired Vision
 client because the server has no thread-order command.
 
-The implementation has only had source-level review on Linux. It still needs a
-real Xcode 26 visionOS build and headset/simulator interaction pass, especially
-for the Speech framework capture path, pinch-and-hold gesture, ornaments, and
-multi-window restoration.
+The implementation passed an Xcode 26 visionOS device build and was installed
+and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07.
+It still needs a hands-on interaction pass, especially for the Speech framework
+capture path, pinch-and-hold gesture, ornaments, and multi-window restoration.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
 the redirect: `t3code-swiftui://clerk-callback` is not in the authorised
