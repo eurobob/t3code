@@ -139,15 +139,15 @@ from the bottom; content and voice-dock growth do not expose it during follow.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
 
-Threads whose active worktree's checked-in `t3.json` advertises deploy scripts
-show one direct Deploy action in the task header. This does not use the mutable
-project-actions list and requires no import step: the client reads the file from
-`thread.worktreePath` (falling back to the project root) and supports its JSONC
-syntax directly. The action runs the first deploy command in that same worktree
-through the existing terminal RPCs and presents bounded live output plus the
-command's real exit status. This repository's one deploy action always requests
-device runtime logs. The terminal subscription is established before the command
-is written, so immediate guard failures are not lost.
+Every task shows one T3-owned Deploy action in the header; repositories do not
+configure it and do not need a deploy entry in `t3.json`. The action runs from
+`thread.worktreePath` (falling back to the project root), commits all current
+worktree changes as a deployment checkpoint when necessary, pushes that exact
+branch, and asks the Mac bridge to deploy it with runtime logging. Successful
+output stays out of the way. A failed deployment exposes its bounded terminal
+output from a compact header error control instead of presenting a modal sheet.
+The terminal subscription is established before the command is written, so
+immediate guard failures are not lost.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or

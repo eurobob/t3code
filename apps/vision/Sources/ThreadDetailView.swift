@@ -70,14 +70,6 @@ final class ThreadDetailModel {
             }
         }
 
-        var systemImage: String {
-            switch self {
-            case .idle: "terminal"
-            case .starting, .running: "ellipsis"
-            case .succeeded: "checkmark.circle.fill"
-            case .failed: "xmark.circle.fill"
-            }
-        }
     }
 
     private enum ActionError: LocalizedError {
@@ -134,7 +126,6 @@ final class ThreadDetailModel {
     private(set) var volatileDictation = ""
     private(set) var dictationError: String?
     private(set) var scriptActionState: ScriptActionState = .idle
-    private(set) var activeScriptName: String?
     private(set) var scriptOutput = ""
     private(set) var scriptOutputWasTruncated = false
     private(set) var submissionRevision = 0
@@ -259,6 +250,8 @@ final class ThreadDetailModel {
         refreshTask = nil
         actionTask?.cancel()
         actionTask = nil
+        scriptTask?.cancel()
+        scriptTask = nil
         cancelDictation()
     }
 
@@ -305,8 +298,7 @@ final class ThreadDetailModel {
         }
     }
 
-    func runScript(
-        _ script: ProjectScript,
+    func deploy(
         project: OrchestrationProject,
         using appModel: AppModel
     ) {
@@ -318,7 +310,6 @@ final class ThreadDetailModel {
             return
         }
 
-        activeScriptName = script.name
         scriptActionState = .starting
         scriptOutput = ""
         scriptOutputWasTruncated = false
@@ -328,7 +319,7 @@ final class ThreadDetailModel {
         scriptTask = Task { [weak self, weak appModel] in
             guard let self, let appModel else { return }
             await performScript(
-                script,
+                Self.deployCommand,
                 project: project,
                 thread: thread,
                 completionMarker: marker,
@@ -337,6 +328,11 @@ final class ThreadDetailModel {
             scriptTask = nil
         }
     }
+
+    /// The bridge snapshots and pushes this task's worktree before deploying it.
+    /// This is owned by T3, never by repository configuration.
+    private static let deployCommand =
+        "MESA_ALLOW_DEPLOY=1 mac-verify --checkpoint --deploy --logs"
 
     func beginDictation(vocabulary: [String]) {
         guard !isBusy else {
@@ -432,7 +428,7 @@ final class ThreadDetailModel {
     }
 
     private func performScript(
-        _ script: ProjectScript,
+        _ command: String,
         project: OrchestrationProject,
         thread: OrchestrationThread,
         completionMarker: String,
@@ -484,7 +480,7 @@ final class ThreadDetailModel {
             try await appModel.writeTerminal(
                 threadID: thread.id,
                 terminalID: terminalID,
-                data: "\(script.command)\r\(completionCommand)\r"
+                data: "\(command)\r\(completionCommand)\r"
             )
             scriptActionState = .running
 
@@ -909,8 +905,7 @@ struct ThreadDetailView: View {
     @State private var voiceDockHeight: CGFloat = 0
     @State private var followsTranscriptBottom = true
     @State private var transcriptIsAtBottom = true
-    @State private var showsScriptOutput = false
-    @State private var checkedInProjectScripts: [ProjectScript] = []
+    @State private var showsDeployError = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -933,15 +928,6 @@ struct ThreadDetailView: View {
         }
         .navigationTitle("")
         .task { await model.start(using: appModel) }
-        .task(id: projectScriptLookupKey) {
-            guard let activeWorktreeRoot else {
-                checkedInProjectScripts = []
-                return
-            }
-            checkedInProjectScripts = await appModel.checkedInProjectScripts(
-                cwd: activeWorktreeRoot
-            )
-        }
         .onChange(of: model.isDictating) {
             if !model.isDictating, model.draft != dictationBaseline {
                 prefersHardwareEditor = true
@@ -953,9 +939,6 @@ struct ThreadDetailView: View {
         }
         .onChange(of: model.draftRestorationRevision) {
             draftEditorMode = prefersHardwareEditor ? .hardwareKeyboard : .softwareKeyboard
-        }
-        .sheet(isPresented: $showsScriptOutput) {
-            ScriptRunOutputView(model: model)
         }
         .onDisappear { model.stop() }
     }
@@ -1085,29 +1068,6 @@ struct ThreadDetailView: View {
                 }
             }
             Spacer()
-            if let primaryDeployScript {
-                Button {
-                    runDeployScript(primaryDeployScript)
-                } label: {
-                    if model.isScriptRunning {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Deploying…")
-                        }
-                    } else {
-                        Label("Deploy", systemImage: scriptSystemImage(primaryDeployScript))
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
-                .accessibilityHint(
-                    model.isScriptRunning
-                        ? "Shows live deployment output"
-                        : "Runs \(primaryDeployScript.name) in this task's worktree"
-                )
-
-            }
             if model.isTurnRunning {
                 Button(role: .destructive) {
                     model.interrupt(using: appModel)
@@ -1119,6 +1079,41 @@ struct ThreadDetailView: View {
                 .foregroundStyle(.white)
                 .disabled(model.isBusy)
                 .accessibilityHint("Dispatches an interrupt using the latest known turn ID")
+            }
+            if case .failed = model.scriptActionState {
+                Button {
+                    showsDeployError.toggle()
+                } label: {
+                    Label("Deployment failed", systemImage: "exclamationmark.triangle.fill")
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .popover(isPresented: $showsDeployError, arrowEdge: .top) {
+                    DeployErrorView(model: model)
+                }
+                .accessibilityHint("Shows the deployment error and terminal output")
+            }
+            if activeProject != nil {
+                Button {
+                    runDeploy()
+                } label: {
+                    if model.isScriptRunning {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Deploying…")
+                        }
+                    } else {
+                        Label("Deploy", systemImage: "hammer.fill")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .accessibilityHint(
+                    model.isScriptRunning
+                        ? "The active task worktree is being deployed"
+                        : "Commits, pushes, and deploys this task's worktree"
+                )
             }
         }
         .padding(.horizontal, 20)
@@ -1402,40 +1397,10 @@ struct ThreadDetailView: View {
         return appModel.snapshot?.projects.first { $0.id == projectID }
     }
 
-    private var primaryDeployScript: ProjectScript? {
-        checkedInProjectScripts.first {
-            !$0.runOnWorktreeCreate
-                && $0.name.localizedCaseInsensitiveContains("deploy")
-        }
-    }
-
-    private var activeWorktreeRoot: String? {
-        guard let activeProject else { return nil }
-        return model.thread?.worktreePath ?? activeProject.workspaceRoot
-    }
-
-    private var projectScriptLookupKey: String {
-        guard let activeWorktreeRoot else { return "\(model.threadID):pending" }
-        let latestTurn = model.thread?.latestTurn
-        return [
-            activeWorktreeRoot,
-            latestTurn?.turnId ?? "no-turn",
-            latestTurn?.completedAt ?? "active",
-        ].joined(separator: ":")
-    }
-
-    private func runDeployScript(_ script: ProjectScript) {
-        showsScriptOutput = true
+    private func runDeploy() {
         guard !model.isScriptRunning, let activeProject else { return }
-        model.runScript(script, project: activeProject, using: appModel)
-    }
-
-    private func scriptSystemImage(_ script: ProjectScript) -> String {
-        switch script.icon {
-        case "build": "hammer.fill"
-        case "debug": "ladybug.fill"
-        default: "play.fill"
-        }
+        showsDeployError = false
+        model.deploy(project: activeProject, using: appModel)
     }
 
     private var voicePreview: String {
@@ -1447,76 +1412,36 @@ struct ThreadDetailView: View {
     }
 }
 
-private struct ScriptRunOutputView: View {
+private struct DeployErrorView: View {
     let model: ThreadDetailModel
-
-    @SwiftUI.Environment(\.dismiss) private var dismiss
-    @State private var followsOutputBottom = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
-                if model.scriptActionState.isRunning {
-                    ProgressView()
-                } else {
-                    Image(systemName: model.scriptActionState.systemImage)
-                        .foregroundStyle(statusColor)
-                }
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(model.activeScriptName ?? "Deploy")
+                    Text("Deployment failed")
                         .font(.headline)
                     Text(model.scriptActionState.label)
                         .font(.caption)
-                        .foregroundStyle(statusColor)
+                        .foregroundStyle(.red)
                         .lineLimit(2)
                 }
-                Spacer()
-                Button(model.scriptActionState.isRunning ? "Hide" : "Done") {
-                    dismiss()
-                }
             }
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(outputText)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(16)
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id("script-output-bottom")
-                }
-                .background(Color.primary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { _ in
-                            followsOutputBottom = false
-                        }
-                )
-                .onChange(of: model.scriptOutput.count) {
-                    guard followsOutputBottom else { return }
-                    proxy.scrollTo("script-output-bottom", anchor: .bottom)
-                }
-                .overlay(alignment: .bottomTrailing) {
-                    if !followsOutputBottom {
-                        Button {
-                            followsOutputBottom = true
-                            proxy.scrollTo("script-output-bottom", anchor: .bottom)
-                        } label: {
-                            Label("Latest", systemImage: "arrow.down")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        .padding(12)
-                    }
-                }
+            ScrollView {
+                Text(outputText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(16)
             }
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .padding(24)
-        .frame(minWidth: 620, minHeight: 440)
+        .padding(20)
+        .frame(width: 560, height: 360)
     }
 
     private var outputText: String {
@@ -1525,13 +1450,6 @@ private struct ScriptRunOutputView: View {
             : model.visibleScriptOutput
     }
 
-    private var statusColor: Color {
-        switch model.scriptActionState {
-        case .failed: .red
-        case .succeeded: .green
-        case .idle, .starting, .running: .secondary
-        }
-    }
 }
 
 private final class HardwareKeyboardTextView: UITextView {

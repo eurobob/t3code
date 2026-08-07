@@ -463,24 +463,6 @@ final class AppModel {
         )
     }
 
-    /// Checked-in project actions are configuration, not mutable project
-    /// state. Read them from the selected task's worktree so every client and
-    /// every task sees the repository's current deployment recipe without an
-    /// import step.
-    func checkedInProjectScripts(cwd: String) async -> [ProjectScript] {
-        guard let client else { return [] }
-        do {
-            let file = try await client.readProjectFile(
-                cwd: cwd,
-                relativePath: "t3.json"
-            )
-            guard !file.truncated else { return [] }
-            return CheckedInProjectScripts.decode(file.contents)
-        } catch {
-            return []
-        }
-    }
-
     func createThreadAndSend(
         projectID: String,
         title: String,
