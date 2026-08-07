@@ -1,0 +1,92 @@
+# Generated into T3Vision.xcodeproj by `xcodegen generate`.
+#
+# Neither Core/ nor App/Cloud/ is copied — both are referenced straight out of
+# apps/swift-ios. They import only Foundation, Security, CryptoKit, Observation
+# and ClerkKit, so they compile for visionOS unmodified, and referencing rather
+# than duplicating keeps the experimental SwiftUI client the single source of
+# truth while it churns.
+name: T3Vision
+
+options:
+  bundleIdPrefix: com.t3tools.t3code
+  deploymentTarget:
+    visionOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  # Package name is "Clerk"; it vends ClerkKit and ClerkKitUI as separate libraries.
+  Clerk:
+    url: https://github.com/clerk/clerk-ios.git
+    minVersion: 0.1.0
+    maxVersion: 100.0.0
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: SZP9K9CJAX
+    CODE_SIGN_STYLE: Automatic
+    # T3 Connect reads these from the Info.plist at runtime. They are the same
+    # public values the hosted web app ships: a Clerk *publishable* key is
+    # designed to be client-visible, and the relay is a public endpoint.
+    T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsudDMuY29kZXMk
+    T3CODE_RELAY_URL: https://relay.t3.codes
+    T3CODE_CLERK_JWT_TEMPLATE: t3-relay
+
+targets:
+  T3Vision:
+    type: application
+    platform: visionOS
+    sources:
+      - path: Sources
+      - path: ../swift-ios/Core
+        name: Core
+      - path: ../swift-ios/App/Cloud
+        name: Cloud
+      # T3ConnectAuth derives its Clerk redirect from PlatformRoute.nativeScheme.
+      # Foundation-only and self-contained, so it ports as-is.
+      - path: ../swift-ios/App/Platform/PlatformDeepLinks.swift
+        name: PlatformDeepLinks
+      # PlatformDeepLinks parses pairing links through this. Foundation-only.
+      - path: ../swift-ios/Features/Connection/ConnectionDetails.swift
+        name: ConnectionDetails
+    dependencies:
+      - package: Clerk
+        product: ClerkKit
+      # Clerk's prebuilt AuthView covers email, OTP and every configured OAuth
+      # provider, which is how the iOS client now signs in.
+      - package: Clerk
+        product: ClerkKitUI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.t3tools.t3code.vision
+        PRODUCT_NAME: T3 Vision
+        INFOPLIST_KEY_CFBundleDisplayName: T3 Vision
+        TARGETED_DEVICE_FAMILY: "7"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: T3 Vision connects to T3 Code servers on your local network.
+    info:
+      path: Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        T3ConnectClerkPublishableKey: $(T3CODE_CLERK_PUBLISHABLE_KEY)
+        T3ConnectRelayHTTPURL: $(T3CODE_RELAY_URL)
+        T3ConnectClerkJWTTemplate: $(T3CODE_CLERK_JWT_TEMPLATE)
+        # ClerkKit hardcodes its OAuth redirect to t3code://clerk-callback.
+        # ASWebAuthenticationSession intercepts that in-process, but the scheme
+        # is declared anyway so the callback is unambiguous.
+        # Must match PlatformRoute.nativeScheme — ClerkKit derives its OAuth
+        # redirect (t3code-swiftui://clerk-callback) from it, and that string is
+        # what Clerk validates against the instance's authorised redirect URIs.
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: T3 Connect Callback
+            CFBundleURLSchemes: [t3code-swiftui]
+
+schemes:
+  T3Vision:
+    build:
+      targets:
+        T3Vision: all
+    run:
+      config: Debug
