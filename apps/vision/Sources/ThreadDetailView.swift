@@ -743,7 +743,7 @@ struct ThreadDetailView: View {
                     followsTranscriptBottom = true
                     proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                 }
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .bottom) {
                     if !followsTranscriptBottom {
                         Button {
                             followsTranscriptBottom = true
@@ -753,6 +753,7 @@ struct ThreadDetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
+                        .tint(.blue)
                         .padding(16)
                     }
                 }
