@@ -605,11 +605,14 @@ final class ThreadDetailModel {
 private enum TranscriptEntry: Identifiable {
     case message(OrchestrationMessage)
     case activity(OrchestrationActivity)
+    case activityBatch([OrchestrationActivity])
 
     var id: String {
         switch self {
         case let .message(message): "message:\(message.id)"
         case let .activity(activity): "activity:\(activity.id)"
+        case let .activityBatch(activities):
+            "activity-batch:\(activities.first?.id ?? "empty"):\(activities.last?.id ?? "empty")"
         }
     }
 
@@ -617,7 +620,24 @@ private enum TranscriptEntry: Identifiable {
         switch self {
         case let .message(message): message.createdAt
         case let .activity(activity): activity.createdAt
+        case let .activityBatch(activities): activities.first?.createdAt ?? ""
         }
+    }
+}
+
+private struct TranscriptBottomPositionPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct TranscriptViewportHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -643,6 +663,10 @@ struct ThreadDetailView: View {
     @State private var dictationBaseline = ""
     @State private var microphoneHovered = false
     @State private var voiceDockHeight: CGFloat = 0
+    @State private var transcriptBottomPosition: CGFloat = 0
+    @State private var transcriptViewportHeight: CGFloat = 0
+    @State private var followsTranscriptBottom = true
+    @State private var isManuallyScrolling = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -702,6 +726,8 @@ struct ThreadDetailView: View {
                                 MessageBubble(message: message)
                             case let .activity(activity):
                                 ActivityRow(activity: activity)
+                            case let .activityBatch(activities):
+                                ActivityBatchRow(activities: activities)
                             }
                         }
 
@@ -713,24 +739,74 @@ struct ThreadDetailView: View {
                         Color.clear
                             .frame(height: 12)
                             .id(transcriptBottomID)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: TranscriptBottomPositionPreferenceKey.self,
+                                        value: geometry.frame(
+                                            in: .named(transcriptCoordinateSpace)
+                                        ).maxY
+                                    )
+                                }
+                            }
                     }
                     .padding(20)
                 }
-                .onChange(of: model.transcriptRevision) {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                .coordinateSpace(name: transcriptCoordinateSpace)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: TranscriptViewportHeightPreferenceKey.self,
+                            value: geometry.size.height
+                        )
                     }
                 }
-                .task(id: voiceDockHeight) {
-                    guard voiceDockHeight > 0 else { return }
-                    await Task.yield()
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                .onPreferenceChange(TranscriptBottomPositionPreferenceKey.self) { position in
+                    transcriptBottomPosition = position
+                    if !isManuallyScrolling, isTranscriptNearBottom {
+                        followsTranscriptBottom = true
                     }
+                }
+                .onPreferenceChange(TranscriptViewportHeightPreferenceKey.self) { height in
+                    transcriptViewportHeight = height
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { _ in
+                            isManuallyScrolling = true
+                            followsTranscriptBottom = false
+                        }
+                        .onEnded { _ in
+                            isManuallyScrolling = false
+                            followsTranscriptBottom = isTranscriptNearBottom
+                        }
+                )
+                .onChange(of: model.transcriptRevision) {
+                    guard followsTranscriptBottom else { return }
+                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                }
+                .task(id: voiceDockHeight) {
+                    guard voiceDockHeight > 0, followsTranscriptBottom else { return }
+                    await Task.yield()
+                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                 }
                 .task(id: model.thread?.id) {
                     await Task.yield()
+                    followsTranscriptBottom = true
                     proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsTranscriptBottom {
+                        Button {
+                            followsTranscriptBottom = true
+                            proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                        } label: {
+                            Label("Latest", systemImage: "arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .padding(16)
+                    }
                 }
             }
 
@@ -993,13 +1069,45 @@ struct ThreadDetailView: View {
         "\(model.threadID)-transcript-bottom"
     }
 
+    private var transcriptCoordinateSpace: String {
+        "\(model.threadID)-transcript-scroll"
+    }
+
+    private var isTranscriptNearBottom: Bool {
+        transcriptBottomPosition <= transcriptViewportHeight + 80
+    }
+
     private var transcriptEntries: [TranscriptEntry] {
         let messages = (model.thread?.messages ?? []).map(TranscriptEntry.message)
         let activities = visibleActivities.map(TranscriptEntry.activity)
-        return (messages + activities).sorted {
+        let sorted = (messages + activities).sorted {
             if $0.createdAt == $1.createdAt { return $0.id < $1.id }
             return $0.createdAt < $1.createdAt
         }
+
+        var entries: [TranscriptEntry] = []
+        var toolBatch: [OrchestrationActivity] = []
+
+        func flushToolBatch() {
+            guard !toolBatch.isEmpty else { return }
+            if toolBatch.count == 1, let activity = toolBatch.first {
+                entries.append(.activity(activity))
+            } else {
+                entries.append(.activityBatch(toolBatch))
+            }
+            toolBatch.removeAll(keepingCapacity: true)
+        }
+
+        for entry in sorted {
+            if case let .activity(activity) = entry, activity.tone == "tool" {
+                toolBatch.append(activity)
+            } else {
+                flushToolBatch()
+                entries.append(entry)
+            }
+        }
+        flushToolBatch()
+        return entries
     }
 
     private var visibleActivities: [OrchestrationActivity] {
@@ -1100,6 +1208,87 @@ private struct HardwareKeyboardDraftEditor: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             text = textView.text
         }
+    }
+}
+
+private struct ActivityBatchRow: View {
+    let activities: [OrchestrationActivity]
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "square.stack.3d.up")
+                        .frame(width: 18)
+                    Text(summary)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(summary), \(expanded ? "collapse" : "expand") actions")
+
+            if expanded {
+                VStack(spacing: 8) {
+                    ForEach(activities, id: \.id) { activity in
+                        ActivityRow(activity: activity)
+                    }
+                }
+                .padding(.leading, 10)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: 620, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var summary: String {
+        let counts = Dictionary(grouping: activities) {
+            $0.payload["itemType"]?.stringValue ?? "other"
+        }.mapValues(\.count)
+        var parts: [String] = []
+
+        appendCount(counts["command_execution"], singular: "Ran 1 command", plural: "Ran %d commands", to: &parts)
+        appendCount(counts["file_change"], singular: "Changed 1 file", plural: "Changed %d files", to: &parts)
+        appendCount(counts["mcp_tool_call"], singular: "Used 1 tool", plural: "Used %d tools", to: &parts)
+        appendCount(counts["web_search"], singular: "Searched the web once", plural: "Searched the web %d times", to: &parts)
+        appendCount(counts["image_generation"], singular: "Generated 1 image", plural: "Generated %d images", to: &parts)
+
+        let recognized = [
+            "command_execution",
+            "file_change",
+            "mcp_tool_call",
+            "web_search",
+            "image_generation",
+        ].reduce(0) { $0 + (counts[$1] ?? 0) }
+        let otherCount = activities.count - recognized
+        appendCount(otherCount, singular: "1 other action", plural: "%d other actions", to: &parts)
+
+        return parts.isEmpty ? "\(activities.count) tool actions" : parts.joined(separator: " · ")
+    }
+
+    private func appendCount(
+        _ count: Int?,
+        singular: String,
+        plural: String,
+        to parts: inout [String]
+    ) {
+        guard let count, count > 0 else { return }
+        parts.append(count == 1 ? singular : String(format: plural, count))
     }
 }
 
