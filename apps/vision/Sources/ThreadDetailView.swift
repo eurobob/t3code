@@ -926,8 +926,6 @@ private struct HardwareKeyboardDraftEditor: UIViewRepresentable {
         view.isScrollEnabled = true
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
-        view.inputAssistantItem.leadingBarButtonGroups = []
-        view.inputAssistantItem.trailingBarButtonGroups = []
         return view
     }
 
