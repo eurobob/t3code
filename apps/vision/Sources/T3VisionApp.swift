@@ -5,14 +5,30 @@ struct T3VisionApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        // The hub. One window per thread is the headline spatial idea, but this
-        // spike deliberately stops at proving the transport — see README.
         WindowGroup {
             RootView()
                 .environment(model)
                 .task { await model.restore() }
         }
         .defaultSize(width: 720, height: 900)
+
+        WindowGroup(id: "thread", for: String.self) { threadID in
+            Group {
+                if case .connected = model.phase, let threadID = threadID.wrappedValue {
+                    NavigationStack {
+                        ThreadDetailView(threadID: threadID)
+                    }
+                } else {
+                    ContentUnavailableView {
+                        Label("Thread unavailable", systemImage: "bubble.left.and.exclamationmark.bubble.right")
+                    } description: {
+                        Text("Connect from the T3 Code window, then open this thread again.")
+                    }
+                }
+            }
+            .environment(model)
+        }
+        .defaultSize(width: 820, height: 780)
     }
 }
 

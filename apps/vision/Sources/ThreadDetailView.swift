@@ -545,6 +545,7 @@ final class ThreadDetailModel {
 
 struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
+    @SwiftUI.Environment(\.openWindow) private var openWindow
     @State private var model: ThreadDetailModel
     @State private var dictationGestureActive = false
 
@@ -568,6 +569,15 @@ struct ThreadDetailView: View {
             }
         }
         .navigationTitle(model.thread?.title ?? "Thread")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    openWindow(id: "thread", value: model.threadID)
+                } label: {
+                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                }
+            }
+        }
         .task { await model.start(using: appModel) }
         .onDisappear { model.stop() }
     }

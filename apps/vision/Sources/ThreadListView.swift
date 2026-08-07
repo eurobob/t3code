@@ -289,7 +289,7 @@ private struct ThreadRow: View {
         .padding(.vertical, 4)
         .contextMenu {
             Button {
-                openWindow(value: thread.id)
+                openWindow(id: "thread", value: thread.id)
             } label: {
                 Label("Open in New Window", systemImage: "macwindow.badge.plus")
             }

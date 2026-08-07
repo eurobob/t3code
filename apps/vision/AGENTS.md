@@ -54,15 +54,24 @@ xcodebuild -project T3Vision.xcodeproj -scheme T3Vision -configuration Release \
 
 ## Current state
 
-Works: pairing to a server by URL, connecting, a live thread list from
-`shellEvents`, live thread detail from `threadEvents`, sending turns, explicit
-interrupt, and client-side steering. Sending while a turn is starting or
-running always steers: interrupt, observe the old turn become terminal on the
-thread stream (normally `interrupted`, or another terminal state if completion
-wins the race), then send the redirect as the next turn. The interrupt control
-is never gated on cached session status and shows the raw session/turn states.
+Implemented: pairing to a server by URL, a live task hub from `shellEvents`,
+live thread detail from `threadEvents`, sending turns, explicit interrupt,
+client-side steering, push-to-talk dictation, project and task creation, task
+organization, and one data-driven spatial window per thread.
 
-Not built yet: dictation, task creation, project views, spatial windows.
+Sending while a turn is starting or running always steers: interrupt, observe
+the old turn become terminal on the thread stream (normally `interrupted`, or
+another terminal state if completion wins the race), then send the redirect as
+the next turn. The interrupt control is never gated on cached session status
+and shows the raw session/turn states. Dictation uses finalized phrases for the
+draft and volatile phrases only for the HUD; cancel preserves edits that do not
+exactly match the dictated suffix. Task ordering is local to each paired Vision
+client because the server has no thread-order command.
+
+The implementation has only had source-level review on Linux. It still needs a
+real Xcode 26 visionOS build and headset/simulator interaction pass, especially
+for the Speech framework capture path, pinch-and-hold gesture, ornaments, and
+multi-window restoration.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
 the redirect: `t3code-swiftui://clerk-callback` is not in the authorised
