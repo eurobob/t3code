@@ -42,6 +42,27 @@ Write code as if it must compile, because someone else will find out that it
 doesn't. Be conservative: check API signatures in `apps/swift-ios/Core` before
 using them rather than assuming shapes.
 
+From this box (Linux) you do not build at all — you publish, and the Mac builds:
+
+```sh
+./apps/vision/publish.sh            # build + install + launch on the headset
+./apps/vision/publish.sh --logs     # …and send back what the app then logged
+```
+
+That script is the whole interface. It pushes HEAD to the branch the deploy
+wrapper's submodule tracks, moves the wrapper's submodule pointer to your commit,
+and hands off to `mac-verify`, which queues the job for the Mac. The Mac runs
+xcodegen and builds — `mesa-deploy` opts into that for any repo shipping
+`project.yml` and no `.xcodeproj`. A warm deploy is ~20s.
+
+Do not try to reproduce those steps by hand. The step that gets missed is the
+submodule pointer: pushing your branch alone leaves the wrapper pointing at the
+previous commit, so the Mac cheerfully builds and installs stale code and the
+deploy looks like it did nothing.
+
+Uncommitted work cannot reach the Mac — it fetches from GitHub, not from this
+disk. `publish.sh` refuses to run on a dirty tree for that reason.
+
 On a Mac the loop is:
 
 ```sh

@@ -7,6 +7,16 @@
       "command": "vp i && ln -sf $T3CODE_PROJECT_ROOT/.env .env && ln -sf $T3CODE_PROJECT_ROOT/infra/relay/.env infra/relay/.env",
       "icon": "configure",
       "runOnWorktreeCreate": true
+    },
+    {
+      "name": "Deploy to Vision Pro",
+      "command": "./apps/vision/publish.sh",
+      "icon": "build"
+    },
+    {
+      "name": "Deploy to Vision Pro (with logs)",
+      "command": "./apps/vision/publish.sh --logs",
+      "icon": "debug"
     }
   ]
 }
