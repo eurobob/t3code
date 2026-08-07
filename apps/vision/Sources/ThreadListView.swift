@@ -215,11 +215,11 @@ struct ThreadListView: View {
             .sorted { left, right in
                 switch (order[left.id], order[right.id]) {
                 case let (leftIndex?, rightIndex?):
-                    leftIndex < rightIndex
+                    return leftIndex < rightIndex
                 case (.some, .none):
-                    true
+                    return true
                 case (.none, .some):
-                    false
+                    return false
                 case (.none, .none):
                     if (left.pinnedAt != nil) != (right.pinnedAt != nil) {
                         return left.pinnedAt != nil
