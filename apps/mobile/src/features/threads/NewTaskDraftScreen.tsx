@@ -51,6 +51,8 @@ import { useRemoteConnectionStatus } from "../../state/use-remote-environment-re
 import { branchBadgeLabel, useNewTaskFlow } from "./new-task-flow-provider";
 import { useCreateProjectThread } from "./use-project-actions";
 import { useIncomingShare } from "../sharing/IncomingShareProvider";
+import { useRegisterDictationTarget } from "../dictation/dictationTarget";
+import { useComposerSoftwareKeyboardHidden } from "../../state/composer-keyboard";
 
 function formatWorkspaceLabel(input: {
   readonly workspaceMode: string;
@@ -112,6 +114,12 @@ export function NewTaskDraftScreen(props: {
   const shareImportDraftBackupRef = useRef(new Map<string, ComposerDraft>());
   const activeShareImportTokenRef = useRef<symbol | null>(null);
   const shareImportMountedRef = useRef(true);
+  // A new task is the most common thing to dictate, so the push-to-talk button
+  // targets this draft while the screen is up. The flow owns the draft key, so
+  // the overlay could not derive it on its own.
+  useRegisterDictationTarget(flow.draftKey ? { draftKey: flow.draftKey, label: "New task" } : null);
+  const softwareKeyboardHidden = useComposerSoftwareKeyboardHidden();
+
   const latestDraftKeyRef = useRef(flow.draftKey);
   const latestIncomingShareIdRef = useRef(props.incomingShareId);
   latestDraftKeyRef.current = flow.draftKey;
@@ -965,6 +973,7 @@ export function NewTaskDraftScreen(props: {
       // animation and stalls it. The runAfterInteractions effect above focuses
       // the editor once the transition settles instead.
       autoFocus={false}
+      softwareKeyboardHidden={softwareKeyboardHidden}
       editable={!isIncomingShareTransferPending}
       multiline
       scrollEnabled={isExpanded}

@@ -12,6 +12,9 @@ const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
+const personalTeamId = isIosPersonalTeamBuild
+  ? repoEnv.T3CODE_IOS_PERSONAL_TEAM_ID?.trim() || undefined
+  : undefined;
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
@@ -188,7 +191,13 @@ const config: ExpoConfig = {
     // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
+    //
+    // Fork builds cannot sign against that team at all, so a personal-team build
+    // signs with its own: set T3CODE_IOS_PERSONAL_TEAM_ID alongside
+    // T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID. The capabilities above are stripped by
+    // withoutIosPersonalTeamCapabilities in that mode, so nothing is left
+    // depending on the T3 team's entitlements.
+    appleTeamId: personalTeamId ?? "ARK85ZXQ4Z",
     associatedDomains: [
       `applinks:${variant.relyingParty}`,
       `webcredentials:${variant.relyingParty}`,
@@ -199,6 +208,13 @@ const config: ExpoConfig = {
       },
       NSLocalNetworkUsageDescription:
         "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
+      // Push-to-talk dictation. Transcription runs on device; the speech
+      // entitlement is still required for the SFSpeechRecognizer fallback used
+      // below iOS 26.
+      NSMicrophoneUsageDescription:
+        "Allow T3 Code to use the microphone so you can dictate instructions to your agents.",
+      NSSpeechRecognitionUsageDescription:
+        "Allow T3 Code to transcribe your speech on device so you can dictate instructions to your agents.",
       ITSAppUsesNonExemptEncryption: false,
       // The App Store screenshot harness rotates the iPad interface from
       // inside the app (CI denies osascript the Accessibility access that

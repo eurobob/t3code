@@ -11,6 +11,7 @@ import { createStaticNavigation, DarkTheme, DefaultTheme } from "@react-navigati
 import { RegistryContext } from "@effect/atom-react";
 import { ConfirmDialogHost } from "./components/ConfirmDialogHost";
 import { CloudAuthProvider } from "./features/cloud/CloudAuthProvider";
+import { PushToTalkOverlay } from "./features/dictation/PushToTalkOverlay";
 import { prepareNativeShowcaseCapture } from "./features/showcase/nativeShowcaseScene";
 import { IncomingShareProvider } from "./features/sharing/IncomingShareProvider";
 import {
@@ -89,6 +90,10 @@ export default function App() {
                   </IncomingShareProvider>
                   <ConfirmDialogHost />
                 </BlurTargetView>
+                {/* Mounted above navigation so the push-to-talk button floats
+                    over every screen and survives navigation. It projects into
+                    OverlayPortalHost below, so it must render before it. */}
+                <PushToTalkOverlay />
                 {/* Anchored-menu overlays render here — in-window, so the
                     keyboard stays up while a dropdown is open. */}
                 <OverlayPortalHost />

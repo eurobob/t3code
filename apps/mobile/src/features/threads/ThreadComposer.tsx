@@ -44,6 +44,7 @@ import {
   type ComposerEditorHandle,
   type ComposerEditorSelection,
 } from "../../components/ComposerEditor";
+import { useComposerSoftwareKeyboardHidden } from "../../state/composer-keyboard";
 import {
   ComposerToolbarButton,
   ComposerToolbarRow,
@@ -271,6 +272,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const bodyText = useScaledTextRole("body");
   const fallbackInputRef = useRef<ComposerEditorHandle>(null);
   const inputRef = props.editorRef ?? fallbackInputRef;
+  const softwareKeyboardHidden = useComposerSoftwareKeyboardHidden();
   const [isFocused, setIsFocused] = useState(false);
   const wasExpandedBeforePreviewRef = useRef(false);
   const inFlightThreadIdsRef = useRef(new Set<string>());
@@ -784,6 +786,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             <ComposerEditor
               ref={inputRef}
               multiline
+              softwareKeyboardHidden={softwareKeyboardHidden}
               value={props.draftMessage}
               skills={selectedProviderStatus?.skills ?? []}
               selection={composerSelection}

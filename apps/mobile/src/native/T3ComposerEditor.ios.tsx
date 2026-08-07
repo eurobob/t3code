@@ -65,6 +65,7 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly autoFocus: boolean;
   readonly autoCorrect: boolean;
   readonly spellCheck: boolean;
+  readonly softwareKeyboardHidden: boolean;
   readonly onComposerChange: (event: NativeEditorEvent) => void;
   readonly onComposerSelectionChange?: (event: NativeSelectionEvent) => void;
   readonly onComposerPasteImages?: (event: NativePasteImagesEvent) => void;
@@ -246,6 +247,7 @@ export function ComposerEditor({
       autoFocus={props.autoFocus ?? false}
       autoCorrect={props.autoCorrect ?? true}
       spellCheck={props.spellCheck ?? true}
+      softwareKeyboardHidden={props.softwareKeyboardHidden ?? false}
       style={style as StyleProp<ViewStyle>}
       onComposerChange={(event) => {
         const acknowledgedEventCount = acceptNativeEvent(

@@ -30,6 +30,28 @@ export interface Preferences {
    * see `resolveThreadListV2Enabled`.
    */
   readonly threadListV2Enabled?: boolean;
+  /**
+   * Shows the floating push-to-talk button. Undefined means the user has never
+   * chosen, which resolves to on wherever dictation is supported.
+   */
+  readonly dictationEnabled?: boolean;
+  /**
+   * Where the push-to-talk button sits. The button always snaps to a side, so
+   * only which side and how far down are persisted — `y` is a fraction of the
+   * usable height, which keeps the position sensible across rotation and split
+   * view.
+   */
+  readonly dictationButtonPosition?: {
+    readonly edge: "left" | "right";
+    readonly y: number;
+  };
+  /**
+   * Hides the on-screen keyboard while leaving the composer focused, so system
+   * Voice Control can dictate into it without the keyboard covering the screen.
+   * Focus is deliberately kept — Voice Control dictates into the focused field,
+   * so suppressing focus instead would break dictation rather than enable it.
+   */
+  readonly composerSoftwareKeyboardHidden?: boolean;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedErrorClass<MobilePreferencesLoadError>()(
@@ -81,6 +103,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     collapsedProjectGroups?: readonly string[];
     projectGroupingEnabled?: boolean;
     threadListV2Enabled?: boolean;
+    dictationEnabled?: boolean;
+    dictationButtonPosition?: { readonly edge: "left" | "right"; readonly y: number };
+    composerSoftwareKeyboardHidden?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -112,6 +137,27 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListV2Enabled === "boolean") {
     preferences.threadListV2Enabled = parsed.threadListV2Enabled;
+  }
+  if (typeof parsed.dictationEnabled === "boolean") {
+    preferences.dictationEnabled = parsed.dictationEnabled;
+  }
+  const position = parsed.dictationButtonPosition;
+  if (
+    typeof position === "object" &&
+    position !== null &&
+    (position.edge === "left" || position.edge === "right") &&
+    typeof position.y === "number" &&
+    Number.isFinite(position.y)
+  ) {
+    // Clamped on read as well as write: a corrupt or out-of-range value would
+    // otherwise strand the button off-screen with no way to drag it back.
+    preferences.dictationButtonPosition = {
+      edge: position.edge,
+      y: Math.min(1, Math.max(0, position.y)),
+    };
+  }
+  if (typeof parsed.composerSoftwareKeyboardHidden === "boolean") {
+    preferences.composerSoftwareKeyboardHidden = parsed.composerSoftwareKeyboardHidden;
   }
   return preferences;
 }

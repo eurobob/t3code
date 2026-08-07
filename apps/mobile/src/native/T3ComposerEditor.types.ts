@@ -26,6 +26,12 @@ export interface ComposerEditorProps {
   readonly scrollEnabled?: boolean;
   readonly autoCorrect?: boolean;
   readonly spellCheck?: boolean;
+  /**
+   * iOS: keeps the composer focused but hides the on-screen keyboard, so system
+   * Voice Control can dictate into it without the keyboard covering the screen.
+   * Hardware keyboards and the caret are unaffected. No-op on Android.
+   */
+  readonly softwareKeyboardHidden?: boolean;
   readonly multiline?: boolean;
   readonly contentInsetVertical?: number;
   /** Android: center a single line vertically (collapsed pill); no-op on iOS. */

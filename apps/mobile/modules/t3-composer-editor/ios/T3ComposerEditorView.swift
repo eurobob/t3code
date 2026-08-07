@@ -467,6 +467,25 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     textView.spellCheckingType = spellCheck ? .yes : .no
   }
 
+  /// Hides the software keyboard while keeping the composer first responder.
+  ///
+  /// This is what makes system Voice Control dictation usable here: Voice
+  /// Control inserts text into the *focused* text field, so the composer has to
+  /// hold focus — but on iPad the keyboard that normally comes with focus
+  /// covers half the screen for an input the user intends to speak into.
+  /// Swapping in a zero-height `inputView` keeps focus (so dictation, the
+  /// caret, selection and hardware keyboards all work) and removes only the
+  /// on-screen keyboard.
+  func setSoftwareKeyboardHidden(_ hidden: Bool) {
+    let alreadyHidden = textView.inputView != nil
+    guard hidden != alreadyHidden else { return }
+
+    textView.inputView = hidden ? UIView(frame: .zero) : nil
+    // Required for the change to take effect on an already-focused field;
+    // without it the swap only applies at the next becomeFirstResponder.
+    textView.reloadInputViews()
+  }
+
   func focusEditor() {
     textView.becomeFirstResponder()
   }

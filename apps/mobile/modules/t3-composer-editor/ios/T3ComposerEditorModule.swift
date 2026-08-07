@@ -41,6 +41,9 @@ public class T3ComposerEditorModule: Module {
       Prop("spellCheck") { (view: T3ComposerEditorView, spellCheck: Bool) in
         view.setSpellCheck(spellCheck)
       }
+      Prop("softwareKeyboardHidden") { (view: T3ComposerEditorView, hidden: Bool) in
+        view.setSoftwareKeyboardHidden(hidden)
+      }
 
       Events(
         "onComposerChange",
