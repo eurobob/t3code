@@ -64,6 +64,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "7"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: T3 Vision connects to T3 Code servers on your local network.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: T3 Vision uses the microphone for push-to-talk task dictation.
     info:
       path: Info.plist
       properties:

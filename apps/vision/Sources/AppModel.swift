@@ -73,6 +73,40 @@ final class AppModel {
 
     var unavailableReason: String? { connect.unavailableReason }
 
+    var dictationVocabulary: [String] {
+        let staticTerms = [
+            "Codex", "Claude", "Claude Code", "Cursor", "Grok", "OpenCode",
+            "T3", "T3 Code", "thread", "worktree", "checkpoint", "pull request",
+            "rebase", "monorepo", "TypeScript", "Swift", "Kotlin",
+        ]
+        var dynamicTerms: [String] = []
+        for project in snapshot?.projects ?? [] {
+            dynamicTerms.append(project.title)
+            dynamicTerms.append(
+                URL(fileURLWithPath: project.workspaceRoot).lastPathComponent
+            )
+        }
+        for thread in (snapshot?.threads ?? []).sorted(by: { $0.updatedAt > $1.updatedAt }) {
+            dynamicTerms.append(thread.title)
+            if let branch = thread.branch {
+                dynamicTerms.append(branch)
+                dynamicTerms.append(branch.replacingOccurrences(
+                    of: "[/_.-]+",
+                    with: " ",
+                    options: .regularExpression
+                ))
+            }
+        }
+
+        var seen: Set<String> = []
+        return (staticTerms + Array(dynamicTerms.prefix(200))).compactMap { term in
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 2, trimmed.count <= 80 else { return nil }
+            guard seen.insert(trimmed.lowercased()).inserted else { return nil }
+            return trimmed
+        }
+    }
+
     /// Restores a previously connected environment, falling back to whatever
     /// stage of sign-in the user is actually at.
     func restore() async {

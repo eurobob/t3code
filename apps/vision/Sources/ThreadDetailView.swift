@@ -29,6 +29,22 @@ final class ThreadDetailModel {
         }
     }
 
+    enum DictationPhase: Equatable {
+        case idle
+        case preparing
+        case listening
+        case finishing
+
+        var label: String? {
+            switch self {
+            case .idle: nil
+            case .preparing: "Preparing dictation…"
+            case .listening: "Listening…"
+            case .finishing: "Finishing dictation…"
+            }
+        }
+    }
+
     private enum ActionError: LocalizedError {
         case threadUnavailable
         case eventStreamEnded
@@ -59,6 +75,9 @@ final class ThreadDetailModel {
     private(set) var actionState: ActionState = .idle
     private(set) var actionError: String?
     private(set) var actionNotice: String?
+    private(set) var dictationPhase: DictationPhase = .idle
+    private(set) var volatileDictation = ""
+    private(set) var dictationError: String?
     var draft = ""
 
     @ObservationIgnored
@@ -69,14 +88,42 @@ final class ThreadDetailModel {
     private var actionTask: Task<Void, Never>?
     @ObservationIgnored
     private var refreshGeneration = 0
+    @ObservationIgnored
+    private let dictationController: VisionDictationController
+    @ObservationIgnored
+    private var dictationTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var dictationActive = false
+    @ObservationIgnored
+    private var committedDictation = ""
 
     init(threadID: String) {
         self.threadID = threadID
+        let dictationController = VisionDictationController()
+        self.dictationController = dictationController
+        dictationController.onVolatile = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard self?.dictationActive == true else { return }
+                self?.volatileDictation = text
+            }
+        }
+        dictationController.onFinalized = { [weak self] text in
+            Task { @MainActor [weak self] in
+                self?.commitDictatedPhrase(text)
+            }
+        }
+        dictationController.onError = { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.finishDictationWithError(message)
+            }
+        }
     }
 
     var thread: OrchestrationThread? { detail?.thread }
 
     var isBusy: Bool { actionState != .idle }
+
+    var isDictating: Bool { dictationPhase != .idle }
 
     var isTurnRunning: Bool {
         guard let thread else { return false }
@@ -120,6 +167,7 @@ final class ThreadDetailModel {
         refreshTask = nil
         actionTask?.cancel()
         actionTask = nil
+        cancelDictation()
     }
 
     func submit(using appModel: AppModel) {
@@ -152,6 +200,76 @@ final class ThreadDetailModel {
             await performInterrupt(using: appModel)
             actionTask = nil
         }
+    }
+
+    func beginDictation(vocabulary: [String]) {
+        guard !isBusy else {
+            dictationError = "Wait for the current thread action to finish."
+            return
+        }
+        guard !dictationActive else { return }
+
+        dictationActive = true
+        committedDictation = ""
+        volatileDictation = ""
+        dictationError = nil
+        dictationPhase = .preparing
+        dictationTask = Task { [weak self] in
+            guard let self else { return }
+            let granted = await VisionDictationController.requestPermission()
+            guard !Task.isCancelled, dictationActive else { return }
+            guard granted else {
+                finishDictationWithError(
+                    VisionDictationError.microphonePermissionDenied.localizedDescription
+                )
+                return
+            }
+            do {
+                try await dictationController.start(contextualStrings: vocabulary)
+                guard dictationActive else {
+                    await dictationController.cancel()
+                    return
+                }
+                if dictationPhase == .preparing { dictationPhase = .listening }
+            } catch is CancellationError {
+                return
+            } catch {
+                finishDictationWithError(error.localizedDescription)
+            }
+        }
+    }
+
+    func finishDictation() {
+        guard dictationActive, dictationPhase != .finishing else { return }
+        dictationPhase = .finishing
+        let preparationTask = dictationTask
+        dictationTask = Task { [weak self] in
+            guard let self else { return }
+            await preparationTask?.value
+            guard dictationActive else { return }
+            await dictationController.finish()
+            dictationActive = false
+            volatileDictation = ""
+            committedDictation = ""
+            dictationPhase = .idle
+            dictationTask = nil
+        }
+    }
+
+    func cancelDictation() {
+        guard dictationActive || dictationPhase != .idle else { return }
+        dictationActive = false
+        dictationTask?.cancel()
+        dictationTask = Task { [weak self] in
+            await self?.dictationController.cancel()
+        }
+        volatileDictation = ""
+        dictationPhase = .idle
+
+        if !committedDictation.isEmpty, draft.hasSuffix(committedDictation) {
+            draft.removeLast(committedDictation.count)
+        }
+        committedDictation = ""
     }
 
     private func startEvents(after sequence: Int, using appModel: AppModel) {
@@ -215,6 +333,24 @@ final class ThreadDetailModel {
     private func apply(_ snapshot: OrchestrationThreadDetailSnapshot) {
         guard snapshot.snapshotSequence >= (detail?.snapshotSequence ?? 0) else { return }
         detail = snapshot
+    }
+
+    private func commitDictatedPhrase(_ phrase: String) {
+        guard dictationActive else { return }
+        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
+        let appended = separator + trimmed
+        draft += appended
+        committedDictation += appended
+        volatileDictation = ""
+    }
+
+    private func finishDictationWithError(_ message: String) {
+        dictationActive = false
+        dictationPhase = .idle
+        volatileDictation = ""
+        dictationError = message
     }
 
     private func performSend(text: String, using appModel: AppModel) async {
@@ -410,6 +546,7 @@ final class ThreadDetailModel {
 struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
     @State private var model: ThreadDetailModel
+    @State private var dictationGestureActive = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -471,7 +608,10 @@ struct ThreadDetailView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .ornament(
+            attachmentAnchor: .scene(.bottom),
+            contentAlignment: .bottom
+        ) {
             composer
         }
     }
@@ -507,10 +647,30 @@ struct ThreadDetailView: View {
     private var composer: some View {
         @Bindable var model = model
         return VStack(alignment: .leading, spacing: 8) {
-            if let error = model.actionError {
+            if let error = model.dictationError ?? model.actionError {
                 Label(error, systemImage: "exclamationmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
+            } else if let label = model.dictationPhase.label {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(label)
+                            .font(.caption.weight(.semibold))
+                        if !model.volatileDictation.isEmpty {
+                            Text(model.volatileDictation)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer()
+                    Button("Cancel", role: .destructive) {
+                        model.cancelDictation()
+                    }
+                    .font(.caption)
+                }
             } else if let notice = model.actionNotice {
                 Text(notice)
                     .font(.caption)
@@ -526,6 +686,8 @@ struct ThreadDetailView: View {
                 .lineLimit(1...6)
                 .disabled(model.isBusy)
 
+                dictationButton
+
                 Button {
                     model.submit(using: appModel)
                 } label: {
@@ -537,12 +699,51 @@ struct ThreadDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(
                     model.isBusy
+                        || model.isDictating
                         || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
             }
         }
         .padding(16)
         .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(width: 680)
+    }
+
+    private var dictationButton: some View {
+        Image(systemName: model.isDictating ? "waveform" : "mic.fill")
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(model.isDictating ? Color.white : Color.primary)
+            .frame(width: 42, height: 42)
+            .background(
+                model.isDictating ? Color.red : Color.secondary.opacity(0.16),
+                in: Circle()
+            )
+            .contentShape(Circle())
+            .opacity(model.isBusy ? 0.4 : 1)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !dictationGestureActive, !model.isBusy else { return }
+                        dictationGestureActive = true
+                        model.beginDictation(vocabulary: appModel.dictationVocabulary)
+                    }
+                    .onEnded { _ in
+                        guard dictationGestureActive else { return }
+                        dictationGestureActive = false
+                        model.finishDictation()
+                    }
+            )
+            .accessibilityElement()
+            .accessibilityLabel(model.isDictating ? "Finish dictation" : "Hold to dictate")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                if model.isDictating {
+                    model.finishDictation()
+                } else {
+                    model.beginDictation(vocabulary: appModel.dictationVocabulary)
+                }
+            }
     }
 }
 
