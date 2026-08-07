@@ -546,7 +546,6 @@ final class ThreadDetailModel {
 struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
     @State private var model: ThreadDetailModel
-    @State private var dictationGestureActive = false
     @State private var showingTextInput = false
 
     init(threadID: String) {
@@ -570,6 +569,11 @@ struct ThreadDetailView: View {
         }
         .navigationTitle("")
         .task { await model.start(using: appModel) }
+        .onChange(of: model.isDictating) {
+            if !model.isDictating, !model.draft.isEmpty {
+                showingTextInput = true
+            }
+        }
         .onDisappear { model.stop() }
     }
 
@@ -666,7 +670,7 @@ struct ThreadDetailView: View {
             } else if let label = model.dictationPhase.label {
                 HStack(spacing: 8) {
                     Image(systemName: "waveform")
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.tint)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(label)
                             .font(.caption.weight(.semibold))
@@ -690,42 +694,64 @@ struct ThreadDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if showingTextInput {
-                TextField(
-                    model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…",
-                    text: $model.draft,
-                    axis: .vertical
-                )
-                .lineLimit(1...4)
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(Color.white.opacity(0.09))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .disabled(model.isBusy)
-            } else if !voicePreview.isEmpty {
+            if model.isDictating, !voicePreview.isEmpty {
                 Text(voicePreview)
                     .font(.body)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.primary)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(Color.white.opacity(0.09))
+                    .background(Color.primary.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else if showingTextInput {
+                HStack(alignment: .top, spacing: 8) {
+                    TextField(
+                        model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…",
+                        text: $model.draft,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...4)
+                    .textFieldStyle(.plain)
+                    .disabled(model.isBusy)
+
+                    if !model.draft.isEmpty {
+                        Button {
+                            model.draft = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Clear message")
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(Color.primary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
             HStack(alignment: .center, spacing: 18) {
-                Button {
-                    showingTextInput.toggle()
-                } label: {
-                    Label(
-                        showingTextInput ? "Hide Text" : "Type Instead",
-                        systemImage: "keyboard"
-                    )
+                Group {
+                    if showingTextInput {
+                        Color.clear
+                            .frame(width: 44, height: 44)
+                    } else {
+                        Button {
+                            showingTextInput = true
+                        } label: {
+                            Image(systemName: "keyboard")
+                                .font(.title3)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Show keyboard")
+                    }
                 }
-                .buttonStyle(.bordered)
-                .tint(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 dictationButton
@@ -733,10 +759,7 @@ struct ThreadDetailView: View {
                 Button {
                     model.submit(using: appModel)
                 } label: {
-                    Label(
-                        model.isTurnRunning ? "Steer" : "Send",
-                        systemImage: model.isTurnRunning ? "arrow.triangle.turn.up.right.diamond.fill" : "arrow.up"
-                    )
+                    Label("Send", systemImage: "arrow.up")
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -748,65 +771,53 @@ struct ThreadDetailView: View {
             }
 
             Text(
-                model.isTurnRunning
-                    ? "Speaking now will stop and redirect the agent."
-                    : "Hold to talk · release to review"
+                model.isDictating
+                    ? "Listening · tap the microphone to stop"
+                    : model.isTurnRunning
+                        ? "Speaking now will stop and redirect the agent."
+                        : "Tap the microphone to start"
             )
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(Color(white: 0.075))
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
     }
 
     private var dictationButton: some View {
-        VStack(spacing: 5) {
-            Image(systemName: model.isDictating ? "waveform" : "mic.fill")
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 88, height: 88)
-                .background(
-                    model.isDictating ? Color.red : Color.accentColor,
-                    in: Circle()
-                )
-                .overlay {
-                    Circle()
-                        .stroke(Color.white.opacity(0.75), lineWidth: 2)
-                        .padding(5)
-                }
-            Text(model.isDictating ? "Listening" : "Hold to Talk")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 118)
-        .contentShape(Rectangle())
-        .opacity(model.isBusy ? 0.4 : 1)
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard !dictationGestureActive, !model.isBusy else { return }
-                    dictationGestureActive = true
-                    showingTextInput = false
-                    model.beginDictation(vocabulary: appModel.dictationVocabulary)
-                }
-                .onEnded { _ in
-                    guard dictationGestureActive else { return }
-                    dictationGestureActive = false
-                    model.finishDictation()
-                }
-        )
-        .accessibilityElement()
-        .accessibilityLabel(model.isDictating ? "Finish dictation" : "Hold to dictate")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction {
+        Button {
             if model.isDictating {
                 model.finishDictation()
             } else {
                 showingTextInput = false
                 model.beginDictation(vocabulary: appModel.dictationVocabulary)
             }
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 76, height: 76)
+                    .background(
+                        model.isDictating ? Color.red : Color.accentColor,
+                        in: Circle()
+                    )
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.75), lineWidth: 2)
+                            .padding(5)
+                    }
+                Text(model.isDictating ? "Stop Recording" : "Speak")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+            }
         }
+        .buttonStyle(.plain)
+        .frame(width: 108)
+        .opacity(model.isBusy ? 0.4 : 1)
+        .disabled(model.isBusy)
+        .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
     }
 
     private var projectTitle: String? {
