@@ -79,6 +79,9 @@ final class ThreadDetailModel {
     private(set) var dictationPhase: DictationPhase = .idle
     private(set) var volatileDictation = ""
     private(set) var dictationError: String?
+    private(set) var submissionRevision = 0
+    private(set) var draftRestorationRevision = 0
+    private(set) var awaitingAgentStart = false
     var draft = ""
 
     @ObservationIgnored
@@ -97,6 +100,8 @@ final class ThreadDetailModel {
     private var dictationActive = false
     @ObservationIgnored
     private var committedDictation = ""
+    @ObservationIgnored
+    private var turnBeforeSubmissionID: String?
     @ObservationIgnored
     private weak var submitAfterDictationAppModel: AppModel?
 
@@ -127,6 +132,12 @@ final class ThreadDetailModel {
         return Self.isTurnRunning(thread)
     }
 
+    var isAgentWorking: Bool { actionState != .idle || awaitingAgentStart || isTurnRunning }
+
+    var workingLabel: String {
+        actionState.label ?? "Agent is working"
+    }
+
     var sessionStatus: String { thread?.session?.status ?? "not bound" }
 
     var turnState: String { thread?.latestTurn?.state ?? "none" }
@@ -138,8 +149,13 @@ final class ThreadDetailModel {
     }
 
     var transcriptRevision: String {
-        guard let last = thread?.messages.last else { return "empty" }
-        return "\(last.id):\(last.updatedAt):\(last.text.count):\(last.streaming)"
+        let message = thread?.messages.last.map {
+            "\($0.id):\($0.updatedAt):\($0.text.count):\($0.streaming)"
+        } ?? "empty"
+        let activity = thread?.activities.last.map {
+            "\($0.id):\($0.createdAt):\($0.kind)"
+        } ?? "none"
+        return "\(message):\(activity):\(isAgentWorking):\(submissionRevision)"
     }
 
     func start(using appModel: AppModel) async {
@@ -178,9 +194,20 @@ final class ThreadDetailModel {
             return
         }
 
+        let optimisticDraft = draft
+        draft = ""
+        submissionRevision &+= 1
+        turnBeforeSubmissionID = thread?.latestTurn?.turnId
+        awaitingAgentStart = true
+        actionState = isTurnRunning ? .requestingInterrupt : .sending
+
         actionTask = Task { [weak self, weak appModel] in
             guard let self, let appModel else { return }
-            await performSend(text: text, using: appModel)
+            await performSend(
+                text: text,
+                restoringOnFailure: optimisticDraft,
+                using: appModel
+            )
             actionTask = nil
         }
     }
@@ -353,6 +380,11 @@ final class ThreadDetailModel {
     private func apply(_ snapshot: OrchestrationThreadDetailSnapshot) {
         guard snapshot.snapshotSequence >= (detail?.snapshotSequence ?? 0) else { return }
         detail = snapshot
+        if awaitingAgentStart,
+           snapshot.thread.latestTurn?.turnId != turnBeforeSubmissionID {
+            awaitingAgentStart = false
+            turnBeforeSubmissionID = nil
+        }
     }
 
     private func commitDictatedPhrase(_ phrase: String) {
@@ -373,7 +405,11 @@ final class ThreadDetailModel {
         dictationError = message
     }
 
-    private func performSend(text: String, using appModel: AppModel) async {
+    private func performSend(
+        text: String,
+        restoringOnFailure optimisticDraft: String,
+        using appModel: AppModel
+    ) async {
         defer { actionState = .idle }
         actionError = nil
         actionNotice = nil
@@ -410,14 +446,17 @@ final class ThreadDetailModel {
             }
 
             _ = try await appModel.sendTurn(thread: currentThread, text: text)
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text {
-                draft = ""
-            }
             actionNotice = steering ? "Redirect sent as the next turn." : "Message sent."
             scheduleRefresh(using: appModel)
         } catch is CancellationError {
             return
         } catch {
+            awaitingAgentStart = false
+            turnBeforeSubmissionID = nil
+            if draft.isEmpty {
+                draft = optimisticDraft
+                draftRestorationRevision &+= 1
+            }
             actionError = error.localizedDescription
         }
     }
@@ -563,6 +602,25 @@ final class ThreadDetailModel {
     }
 }
 
+private enum TranscriptEntry: Identifiable {
+    case message(OrchestrationMessage)
+    case activity(OrchestrationActivity)
+
+    var id: String {
+        switch self {
+        case let .message(message): "message:\(message.id)"
+        case let .activity(activity): "activity:\(activity.id)"
+        }
+    }
+
+    var createdAt: String {
+        switch self {
+        case let .message(message): message.createdAt
+        case let .activity(activity): activity.createdAt
+        }
+    }
+}
+
 struct ThreadDetailView: View {
     private enum DraftEditorMode {
         case hidden
@@ -604,6 +662,12 @@ struct ThreadDetailView: View {
                 draftEditorMode = .hardwareKeyboard
             }
         }
+        .onChange(of: model.submissionRevision) {
+            draftEditorMode = .hidden
+        }
+        .onChange(of: model.draftRestorationRevision) {
+            draftEditorMode = prefersHardwareEditor ? .hardwareKeyboard : .softwareKeyboard
+        }
         .onDisappear { model.stop() }
     }
 
@@ -623,9 +687,18 @@ struct ThreadDetailView: View {
                                 .padding(.horizontal, 20)
                         }
 
-                        ForEach(model.thread?.messages ?? []) { message in
-                            MessageBubble(message: message)
-                                .id(message.id)
+                        ForEach(transcriptEntries) { entry in
+                            switch entry {
+                            case let .message(message):
+                                MessageBubble(message: message)
+                            case let .activity(activity):
+                                ActivityRow(activity: activity)
+                            }
+                        }
+
+                        if model.isAgentWorking {
+                            AgentWorkingRow(label: model.workingLabel)
+                                .id("\(model.threadID)-working")
                         }
 
                         Color.clear
@@ -663,18 +736,24 @@ struct ThreadDetailView: View {
                     .lineLimit(1)
                 if let label = model.actionState.label {
                     HStack(spacing: 7) {
-                        ProgressView()
-                            .controlSize(.mini)
+                        Image(systemName: "ellipsis")
+                            .fontWeight(.semibold)
                         Text(label)
                     }
                     .font(.caption)
-                } else {
-                    Label(
-                        model.isTurnRunning ? "Agent is working" : "Ready",
-                        systemImage: model.isTurnRunning ? "circle.fill" : "circle"
-                    )
+                    .foregroundStyle(.tint)
+                } else if model.isTurnRunning {
+                    HStack(spacing: 7) {
+                        Image(systemName: "ellipsis")
+                            .fontWeight(.semibold)
+                        Text("Agent is working")
+                    }
                     .font(.caption)
-                    .foregroundStyle(model.isTurnRunning ? Color.green : Color.secondary)
+                    .foregroundStyle(.tint)
+                } else {
+                    Text("Ready")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -813,8 +892,12 @@ struct ThreadDetailView: View {
                     }
                 } label: {
                     Label("Send", systemImage: "arrow.up")
+                        .font(.body.weight(.semibold))
+                        .frame(minWidth: 96, minHeight: 52)
                 }
                 .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(.blue)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .disabled(
                     model.isBusy
@@ -823,15 +906,6 @@ struct ThreadDetailView: View {
                     )
             }
 
-            Text(
-                model.isDictating
-                    ? "Listening · tap the microphone to stop"
-                    : model.isTurnRunning
-                        ? "Speaking now will stop and redirect the agent."
-                        : "Tap the microphone to start"
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -862,7 +936,7 @@ struct ThreadDetailView: View {
                 .contentShape(.hoverEffect, Circle())
         }
         .buttonStyle(.plain)
-        .hoverEffectDisabled()
+        .hoverEffect(.lift)
         .onHover { microphoneHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: microphoneHovered)
         .animation(.easeOut(duration: 0.12), value: model.isDictating)
@@ -883,6 +957,47 @@ struct ThreadDetailView: View {
 
     private var transcriptBottomID: String {
         "\(model.threadID)-transcript-bottom"
+    }
+
+    private var transcriptEntries: [TranscriptEntry] {
+        let messages = (model.thread?.messages ?? []).map(TranscriptEntry.message)
+        let activities = visibleActivities.map(TranscriptEntry.activity)
+        return (messages + activities).sorted {
+            if $0.createdAt == $1.createdAt { return $0.id < $1.id }
+            return $0.createdAt < $1.createdAt
+        }
+    }
+
+    private var visibleActivities: [OrchestrationActivity] {
+        let activities = model.thread?.activities ?? []
+        let completedTools = Set(
+            activities
+                .filter { $0.kind == "tool.completed" }
+                .map { activityCorrelationKey($0) }
+        )
+        return activities.filter { activity in
+            if activity.tone == "error" || activity.tone == "approval" { return true }
+            guard activity.tone == "tool" else { return false }
+            switch activity.kind {
+            case "tool.completed":
+                return true
+            case "tool.started":
+                return !completedTools.contains(activityCorrelationKey(activity))
+            default:
+                return false
+            }
+        }
+    }
+
+    private func activityCorrelationKey(_ activity: OrchestrationActivity) -> String {
+        let itemType = activity.payload["itemType"]?.stringValue ?? "tool"
+        let normalizedSummary = activity.summary.replacingOccurrences(
+            of: #"\s+started$"#,
+            with: "",
+            options: .regularExpression
+        )
+        let detail = activity.payload["detail"]?.stringValue ?? normalizedSummary
+        return "\(activity.turnId ?? "thread"):\(itemType):\(detail)"
     }
 
     private var projectTitle: String? {
@@ -951,6 +1066,79 @@ private struct HardwareKeyboardDraftEditor: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             text = textView.text
         }
+    }
+}
+
+private struct ActivityRow: View {
+    let activity: OrchestrationActivity
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon)
+                .frame(width: 18)
+                .foregroundStyle(iconColor)
+            Text(summary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: 620, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var summary: String {
+        activity.summary.replacingOccurrences(
+            of: #"\s+started$"#,
+            with: "",
+            options: .regularExpression
+        )
+    }
+
+    private var icon: String {
+        if activity.tone == "error" { return "exclamationmark.triangle.fill" }
+        if activity.tone == "approval" { return "hand.raised.fill" }
+        if activity.kind == "tool.started" { return "ellipsis" }
+        switch activity.payload["itemType"]?.stringValue {
+        case "command_execution": "terminal"
+        case "file_change": "doc.badge.gearshape"
+        case "mcp_tool_call": "wrench.and.screwdriver"
+        case "web_search": "globe"
+        case "image_generation": "photo"
+        default: "gearshape.2"
+        }
+    }
+
+    private var iconColor: Color {
+        switch activity.tone {
+        case "error": .red
+        case "approval": .orange
+        default: .secondary
+        }
+    }
+}
+
+private struct AgentWorkingRow: View {
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "ellipsis")
+                .font(.body.weight(.semibold))
+            Text(label)
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(Color.secondary.opacity(0.09))
+        .clipShape(Capsule())
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(label)
     }
 }
 

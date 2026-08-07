@@ -359,18 +359,23 @@ private struct ThreadRow: View {
             }
 
             HStack(spacing: 8) {
-                if let status = thread.session?.status,
-                   status == "starting" || status == "running" {
-                    Label("Working", systemImage: "circle.fill")
-                        .foregroundStyle(.green)
-                } else if thread.settledAt != nil {
-                    Label("Done", systemImage: "checkmark.circle.fill")
-                } else {
-                    Label("Ready", systemImage: "circle")
-                }
                 if thread.hasPendingApprovals || thread.hasPendingUserInput {
-                    Label("Needs input", systemImage: "exclamationmark.circle.fill")
+                    Label("Needs you", systemImage: "exclamationmark")
                         .foregroundStyle(.orange)
+                } else if let status = thread.session?.status,
+                          status == "starting" || status == "running" {
+                    HStack(spacing: 5) {
+                        Image(systemName: "ellipsis")
+                            .fontWeight(.semibold)
+                        Text("Working")
+                    }
+                    .foregroundStyle(.tint)
+                } else if thread.session?.status == "error" {
+                    Label("Error", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                } else if thread.settledAt != nil {
+                    Text("Complete")
+                        .foregroundStyle(.tertiary)
                 }
             }
             .font(.caption2)
