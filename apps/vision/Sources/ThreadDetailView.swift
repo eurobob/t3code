@@ -627,19 +627,21 @@ struct ThreadDetailView: View {
                             MessageBubble(message: message)
                                 .id(message.id)
                         }
+
+                        Color.clear
+                            .frame(height: 12)
+                            .id(transcriptBottomID)
                     }
                     .padding(20)
                 }
                 .onChange(of: model.transcriptRevision) {
-                    guard let id = model.thread?.messages.last?.id else { return }
                     withAnimation(.easeOut(duration: 0.18)) {
-                        proxy.scrollTo(id, anchor: .bottom)
+                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                     }
                 }
                 .task(id: model.thread?.id) {
                     await Task.yield()
-                    guard let id = model.thread?.messages.last?.id else { return }
-                    proxy.scrollTo(id, anchor: .bottom)
+                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                 }
             }
 
@@ -877,6 +879,10 @@ struct ThreadDetailView: View {
 
     private var messagePrompt: String {
         model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…"
+    }
+
+    private var transcriptBottomID: String {
+        "\(model.threadID)-transcript-bottom"
     }
 
     private var projectTitle: String? {
