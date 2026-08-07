@@ -234,6 +234,24 @@ final class AppModel {
         return await client.threadEvents(threadID: threadID, after: sequence)
     }
 
+    func sendTurn(
+        thread: OrchestrationThread,
+        text: String
+    ) async throws -> DispatchResult {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.sendTurn(
+            threadID: thread.id,
+            text: text,
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode
+        )
+    }
+
+    func interrupt(threadID: String, turnID: String?) async throws -> DispatchResult {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.interrupt(threadID: threadID, turnID: turnID)
+    }
+
     func signOut() async {
         await disconnect()
         await connect.signOut()

@@ -54,12 +54,15 @@ xcodebuild -project T3Vision.xcodeproj -scheme T3Vision -configuration Release \
 
 ## Current state
 
-Works: pairing to a server by URL, connecting, a live thread list that updates
-from `shellEvents`.
+Works: pairing to a server by URL, connecting, a live thread list from
+`shellEvents`, live thread detail from `threadEvents`, sending turns, explicit
+interrupt, and client-side steering. Sending while a turn is starting or
+running always steers: interrupt, observe the old turn become terminal on the
+thread stream (normally `interrupted`, or another terminal state if completion
+wins the race), then send the redirect as the next turn. The interrupt control
+is never gated on cached session status and shows the raw session/turn states.
 
-Not built yet: thread detail, composer, dictation, interrupt/steer, task
-creation, project views, spatial windows. The app is a proof that the transport
-works — nothing more.
+Not built yet: dictation, task creation, project views, spatial windows.
 
 T3 Connect sign-in is wired but **does not work in this build**. Clerk rejects
 the redirect: `t3code-swiftui://clerk-callback` is not in the authorised
