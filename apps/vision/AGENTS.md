@@ -86,6 +86,10 @@ visible from local send through provider start. Tool start/completion pairs are
 deduplicated. Sidebar status is intentionally quiet when idle: only working,
 needs-you, error, and a subdued completed state are shown. The microphone uses
 the native circular lift hover effect, and Send is a larger blue capsule.
+Voice-dock height changes scroll the transcript bottom into view so dictation
+growth moves the latest bubbles above the controls. Successful sends do not
+show a redundant confirmation. Stop and dictation Cancel are solid red/white
+buttons, and activity rows with server-projected detail can expand to reveal it.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -98,7 +102,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `1d10016b`.
+most recently at product commit `2db95619`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
