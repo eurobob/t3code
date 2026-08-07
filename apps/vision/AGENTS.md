@@ -78,6 +78,15 @@ Connection failures preserve the saved environment and Keychain credential;
 the failure screen identifies the saved host and retries it directly instead
 of forcing another pairing exchange.
 
+Sending is optimistic: once accepted locally, the draft clears and its editor
+collapses before dispatch completes; a failed dispatch restores the draft and
+reopens the appropriate editor. The transcript merges messages with compact
+tool, approval, and error activities and keeps a static ellipsis working row
+visible from local send through provider start. Tool start/completion pairs are
+deduplicated. Sidebar status is intentionally quiet when idle: only working,
+needs-you, error, and a subdued completed state are shown. The microphone uses
+the native circular lift hover effect, and Send is a larger blue capsule.
+
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
 another terminal state if completion wins the race), then send the redirect as
@@ -89,7 +98,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `7527f41b`.
+most recently at product commit `1d10016b`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
