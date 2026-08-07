@@ -446,7 +446,7 @@ final class ThreadDetailModel {
             }
 
             _ = try await appModel.sendTurn(thread: currentThread, text: text)
-            actionNotice = steering ? "Redirect sent as the next turn." : "Message sent."
+            actionNotice = nil
             scheduleRefresh(using: appModel)
         } catch is CancellationError {
             return
@@ -621,6 +621,14 @@ private enum TranscriptEntry: Identifiable {
     }
 }
 
+private struct VoiceDockHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct ThreadDetailView: View {
     private enum DraftEditorMode {
         case hidden
@@ -634,6 +642,7 @@ struct ThreadDetailView: View {
     @State private var prefersHardwareEditor = false
     @State private var dictationBaseline = ""
     @State private var microphoneHovered = false
+    @State private var voiceDockHeight: CGFloat = 0
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -712,6 +721,11 @@ struct ThreadDetailView: View {
                         proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                     }
                 }
+                .onChange(of: voiceDockHeight) {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                    }
+                }
                 .task(id: model.thread?.id) {
                     await Task.yield()
                     proxy.scrollTo(transcriptBottomID, anchor: .bottom)
@@ -762,7 +776,9 @@ struct ThreadDetailView: View {
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .foregroundStyle(.white)
             .disabled(model.isBusy)
             .accessibilityHint("Always dispatches an interrupt using the latest known turn ID")
         }
@@ -796,7 +812,10 @@ struct ThreadDetailView: View {
                     Button("Cancel", role: .destructive) {
                         model.cancelDictation()
                     }
-                    .font(.caption)
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .foregroundStyle(.white)
                 }
             } else if let notice = model.actionNotice {
                 Text(notice)
@@ -910,6 +929,17 @@ struct ThreadDetailView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.regularMaterial)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: VoiceDockHeightPreferenceKey.self,
+                    value: proxy.size.height
+                )
+            }
+        }
+        .onPreferenceChange(VoiceDockHeightPreferenceKey.self) {
+            voiceDockHeight = $0
+        }
     }
 
     private var dictationButton: some View {
@@ -1071,8 +1101,42 @@ private struct HardwareKeyboardDraftEditor: UIViewRepresentable {
 
 private struct ActivityRow: View {
     let activity: OrchestrationActivity
+    @State private var expanded = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if detail == nil {
+                header
+            } else {
+                Button {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        expanded.toggle()
+                    }
+                } label: {
+                    header
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(summary), \(expanded ? "collapse" : "expand") details")
+            }
+
+            if expanded, let detail {
+                Text(detail)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 27)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: 620, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var header: some View {
         HStack(spacing: 9) {
             Image(systemName: icon)
                 .frame(width: 18)
@@ -1080,15 +1144,15 @@ private struct ActivityRow: View {
             Text(summary)
                 .lineLimit(2)
             Spacer(minLength: 0)
+            if detail != nil {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+            }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.secondary.opacity(0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .frame(maxWidth: 620, alignment: .leading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var summary: String {
@@ -1119,6 +1183,11 @@ private struct ActivityRow: View {
         case "approval": .orange
         default: .secondary
         }
+    }
+
+    private var detail: String? {
+        activity.payload["detail"]?.stringValue
+            ?? activity.payload["message"]?.stringValue
     }
 }
 
