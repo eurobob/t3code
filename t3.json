@@ -10,13 +10,8 @@
     },
     {
       "name": "Deploy to Vision Pro",
-      "command": "./apps/vision/publish.sh",
-      "icon": "build"
-    },
-    {
-      "name": "Deploy to Vision Pro (with logs)",
       "command": "./apps/vision/publish.sh --logs",
-      "icon": "debug"
+      "icon": "build"
     }
   ]
 }

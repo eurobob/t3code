@@ -1107,22 +1107,6 @@ struct ThreadDetailView: View {
                         : "Runs \(primaryDeployScript.name) in this task's worktree"
                 )
 
-                if deployScripts.count > 1 {
-                    Menu {
-                        ForEach(Array(deployScripts.dropFirst())) { script in
-                            Button {
-                                runDeployScript(script)
-                            } label: {
-                                Label(script.name, systemImage: scriptSystemImage(script))
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.down")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isScriptRunning)
-                    .accessibilityLabel("More deploy actions")
-                }
             }
             if model.isTurnRunning {
                 Button(role: .destructive) {
@@ -1418,8 +1402,8 @@ struct ThreadDetailView: View {
         return appModel.snapshot?.projects.first { $0.id == projectID }
     }
 
-    private var deployScripts: [ProjectScript] {
-        checkedInProjectScripts.filter {
+    private var primaryDeployScript: ProjectScript? {
+        checkedInProjectScripts.first {
             !$0.runOnWorktreeCreate
                 && $0.name.localizedCaseInsensitiveContains("deploy")
         }
@@ -1438,10 +1422,6 @@ struct ThreadDetailView: View {
             latestTurn?.turnId ?? "no-turn",
             latestTurn?.completedAt ?? "active",
         ].joined(separator: ":")
-    }
-
-    private var primaryDeployScript: ProjectScript? {
-        deployScripts.first
     }
 
     private func runDeployScript(_ script: ProjectScript) {
