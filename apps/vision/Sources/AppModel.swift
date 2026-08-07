@@ -89,6 +89,13 @@ final class AppModel {
 
     var unavailableReason: String? { connect.unavailableReason }
 
+    var savedEnvironmentAddress: String? {
+        guard let environment else { return nil }
+        let host = environment.httpBaseURL.host ?? environment.httpBaseURL.absoluteString
+        guard let port = environment.httpBaseURL.port else { return host }
+        return "\(host):\(port)"
+    }
+
     var availableModels: [VisionModelOption] {
         let configured = (serverConfig?.providers ?? []).flatMap { provider -> [VisionModelOption] in
             guard provider.enabled,
@@ -342,6 +349,32 @@ final class AppModel {
         threadOrder = []
         environment = nil
         phase = account == nil ? .signedOut : .choosingEnvironment
+    }
+
+    /// Reconnects with the saved environment and Keychain credential. A
+    /// gateway outage must never turn into an unnecessary pairing flow.
+    func retryConnection() async {
+        let saved: Environment?
+        if let environment {
+            saved = environment
+        } else {
+            saved = try? await runtime.activeEnvironment()
+        }
+        guard let saved else {
+            phase = account == nil ? .signedOut : .choosingEnvironment
+            return
+        }
+
+        eventsTask?.cancel()
+        eventsTask = nil
+        configEventsTask?.cancel()
+        configEventsTask = nil
+        await client?.disconnect()
+        client = nil
+        snapshot = nil
+        archivedThreads = []
+        serverConfig = nil
+        await adopt(saved)
     }
 
     func threadSnapshot(id: String) async throws -> OrchestrationThreadDetailSnapshot {

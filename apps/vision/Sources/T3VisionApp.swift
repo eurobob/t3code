@@ -49,9 +49,19 @@ struct RootView: View {
             ContentUnavailableView {
                 Label("Could not connect", systemImage: "exclamationmark.triangle")
             } description: {
-                Text(message)
+                VStack(spacing: 8) {
+                    Text(message)
+                    if let address = model.savedEnvironmentAddress {
+                        Text("Your pairing is still saved for \(address).")
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } actions: {
-                Button("Back") { Task { await model.disconnect() } }
+                if model.environment != nil {
+                    Button("Retry") { Task { await model.retryConnection() } }
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Use Another Server") { Task { await model.disconnect() } }
             }
         }
     }

@@ -67,7 +67,16 @@ Provider-advertised model options such as reasoning effort are sent through the
 real `ModelSelection` option surface. The task composer is a layout-reserved
 system-material voice dock: dictation is primary, manual text is opt-in, and it
 never overlays the transcript. Recording continues after one tap and stops on
-the next; finalized dictation remains editable and can be cleared before send.
+the next; Send can also finalize and submit an active recording. Finalized
+dictation remains editable and can be cleared before send, using a
+hardware-keyboard-only editor that does not summon the software keyboard.
+The microphone is an unlabeled circular target with neutral, hover, and recording
+colors. Selecting another task assigns the detail view that thread's identity so
+SwiftUI cannot retain the previous thread model. Auto-scroll targets a spacer
+after the final message to preserve breathing room above the voice dock.
+Connection failures preserve the saved environment and Keychain credential;
+the failure screen identifies the saved host and retries it directly instead
+of forcing another pairing exchange.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -80,7 +89,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `21839bde`.
+most recently at product commit `5bd0134b`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
