@@ -216,6 +216,7 @@ struct ThreadListView: View {
         switch selection {
         case let .thread(threadID):
             ThreadDetailView(threadID: threadID)
+                .id(threadID)
         case let .newTask(requestID, projectID):
             NewTaskView(
                 projectID: projectID,

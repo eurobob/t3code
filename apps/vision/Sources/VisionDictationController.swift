@@ -28,9 +28,9 @@ final class VisionDictationController {
     private var analyzerFormat: AVAudioFormat?
     private var isRunning = false
 
-    var onVolatile: ((String) -> Void)?
-    var onFinalized: ((String) -> Void)?
-    var onError: ((String) -> Void)?
+    var onVolatile: (@MainActor @Sendable (String) -> Void)?
+    var onFinalized: (@MainActor @Sendable (String) -> Void)?
+    var onError: (@MainActor @Sendable (String) -> Void)?
 
     static func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -77,7 +77,7 @@ final class VisionDictationController {
         let (inputs, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
         inputBuilder = continuation
 
-        resultsTask = Task { [weak self] in
+        resultsTask = Task { @MainActor [weak self] in
             do {
                 for try await result in transcriber.results {
                     let text = String(result.text.characters)
@@ -108,6 +108,9 @@ final class VisionDictationController {
         inputBuilder?.finish()
         inputBuilder = nil
         try? await analyzer?.finalizeAndFinishThroughEndOfInput()
+        let pendingResults = resultsTask
+        await pendingResults?.value
+        resultsTask = nil
         await teardown()
     }
 

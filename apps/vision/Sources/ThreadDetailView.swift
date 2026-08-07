@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import UIKit
 
 @MainActor
 @Observable
@@ -96,26 +97,22 @@ final class ThreadDetailModel {
     private var dictationActive = false
     @ObservationIgnored
     private var committedDictation = ""
+    @ObservationIgnored
+    private weak var submitAfterDictationAppModel: AppModel?
 
     init(threadID: String) {
         self.threadID = threadID
         let dictationController = VisionDictationController()
         self.dictationController = dictationController
         dictationController.onVolatile = { [weak self] text in
-            Task { @MainActor [weak self] in
-                guard self?.dictationActive == true else { return }
-                self?.volatileDictation = text
-            }
+            guard self?.dictationActive == true else { return }
+            self?.volatileDictation = text
         }
         dictationController.onFinalized = { [weak self] text in
-            Task { @MainActor [weak self] in
-                self?.commitDictatedPhrase(text)
-            }
+            self?.commitDictatedPhrase(text)
         }
         dictationController.onError = { [weak self] message in
-            Task { @MainActor [weak self] in
-                self?.finishDictationWithError(message)
-            }
+            self?.finishDictationWithError(message)
         }
     }
 
@@ -240,7 +237,25 @@ final class ThreadDetailModel {
     }
 
     func finishDictation() {
-        guard dictationActive, dictationPhase != .finishing else { return }
+        finishDictation(submitUsing: nil)
+    }
+
+    func finishDictationAndSubmit(using appModel: AppModel) {
+        finishDictation(submitUsing: appModel)
+    }
+
+    private func finishDictation(submitUsing appModel: AppModel?) {
+        if let appModel {
+            submitAfterDictationAppModel = appModel
+        }
+        guard dictationActive else {
+            if let submitAfterDictationAppModel {
+                self.submitAfterDictationAppModel = nil
+                submit(using: submitAfterDictationAppModel)
+            }
+            return
+        }
+        guard dictationPhase != .finishing else { return }
         dictationPhase = .finishing
         let preparationTask = dictationTask
         dictationTask = Task { [weak self] in
@@ -253,6 +268,10 @@ final class ThreadDetailModel {
             committedDictation = ""
             dictationPhase = .idle
             dictationTask = nil
+            if let submitAfterDictationAppModel {
+                self.submitAfterDictationAppModel = nil
+                submit(using: submitAfterDictationAppModel)
+            }
         }
     }
 
@@ -265,6 +284,7 @@ final class ThreadDetailModel {
         }
         volatileDictation = ""
         dictationPhase = .idle
+        submitAfterDictationAppModel = nil
 
         if !committedDictation.isEmpty, draft.hasSuffix(committedDictation) {
             draft.removeLast(committedDictation.count)
@@ -544,9 +564,18 @@ final class ThreadDetailModel {
 }
 
 struct ThreadDetailView: View {
+    private enum DraftEditorMode {
+        case hidden
+        case softwareKeyboard
+        case hardwareKeyboard
+    }
+
     @SwiftUI.Environment(AppModel.self) private var appModel
     @State private var model: ThreadDetailModel
-    @State private var showingTextInput = false
+    @State private var draftEditorMode = DraftEditorMode.hidden
+    @State private var prefersHardwareEditor = false
+    @State private var dictationBaseline = ""
+    @State private var microphoneHovered = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -570,8 +599,9 @@ struct ThreadDetailView: View {
         .navigationTitle("")
         .task { await model.start(using: appModel) }
         .onChange(of: model.isDictating) {
-            if !model.isDictating, !model.draft.isEmpty {
-                showingTextInput = true
+            if !model.isDictating, model.draft != dictationBaseline {
+                prefersHardwareEditor = true
+                draftEditorMode = .hardwareKeyboard
             }
         }
         .onDisappear { model.stop() }
@@ -704,16 +734,27 @@ struct ThreadDetailView: View {
                     .padding(.vertical, 10)
                     .background(Color.primary.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            } else if showingTextInput {
+            } else if draftEditorMode != .hidden {
                 HStack(alignment: .top, spacing: 8) {
-                    TextField(
-                        model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…",
-                        text: $model.draft,
-                        axis: .vertical
-                    )
-                    .lineLimit(1...4)
-                    .textFieldStyle(.plain)
-                    .disabled(model.isBusy)
+                    if draftEditorMode == .hardwareKeyboard {
+                        ZStack(alignment: .topLeading) {
+                            if model.draft.isEmpty {
+                                Text(messagePrompt)
+                                    .foregroundStyle(.tertiary)
+                                    .allowsHitTesting(false)
+                            }
+                            HardwareKeyboardDraftEditor(text: $model.draft)
+                        }
+                        .frame(minHeight: 24, idealHeight: 52, maxHeight: 88)
+                    } else {
+                        TextField(
+                            messagePrompt,
+                            text: $model.draft,
+                            axis: .vertical
+                        )
+                        .lineLimit(1...4)
+                        .textFieldStyle(.plain)
+                    }
 
                     if !model.draft.isEmpty {
                         Button {
@@ -731,33 +772,43 @@ struct ThreadDetailView: View {
                 .padding(.vertical, 11)
                 .background(Color.primary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .disabled(model.isBusy)
             }
 
             HStack(alignment: .center, spacing: 18) {
-                Group {
-                    if showingTextInput {
-                        Color.clear
-                            .frame(width: 44, height: 44)
+                Button {
+                    if draftEditorMode == .hidden {
+                        draftEditorMode = prefersHardwareEditor
+                            ? .hardwareKeyboard
+                            : .softwareKeyboard
                     } else {
-                        Button {
-                            showingTextInput = true
-                        } label: {
-                            Image(systemName: "keyboard")
-                                .font(.title3)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Show keyboard")
+                        draftEditorMode = .hidden
                     }
+                } label: {
+                    Image(
+                        systemName: draftEditorMode == .hidden
+                            ? "keyboard"
+                            : "keyboard.chevron.compact.down"
+                    )
+                    .font(.title3)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel(
+                    draftEditorMode == .hidden ? "Show message editor" : "Hide message editor"
+                )
 
                 dictationButton
 
                 Button {
-                    model.submit(using: appModel)
+                    if model.isDictating {
+                        model.finishDictationAndSubmit(using: appModel)
+                    } else {
+                        model.submit(using: appModel)
+                    }
                 } label: {
                     Label("Send", systemImage: "arrow.up")
                 }
@@ -765,8 +816,8 @@ struct ThreadDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .disabled(
                     model.isBusy
-                        || model.isDictating
-                        || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || (!model.isDictating
+                            && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     )
             }
 
@@ -790,34 +841,42 @@ struct ThreadDetailView: View {
             if model.isDictating {
                 model.finishDictation()
             } else {
-                showingTextInput = false
+                dictationBaseline = model.draft
+                draftEditorMode = .hidden
                 model.beginDictation(vocabulary: appModel.dictationVocabulary)
             }
         } label: {
-            VStack(spacing: 5) {
-                Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 76, height: 76)
-                    .background(
-                        model.isDictating ? Color.red : Color.accentColor,
-                        in: Circle()
-                    )
-                    .overlay {
-                        Circle()
-                            .stroke(Color.white.opacity(0.75), lineWidth: 2)
-                            .padding(5)
-                    }
-                Text(model.isDictating ? "Stop Recording" : "Speak")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary)
-            }
+            Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 76, height: 76)
+                .background(microphoneColor, in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.72), lineWidth: 2)
+                        .padding(5)
+                }
+                .contentShape(.interaction, Circle())
+                .contentShape(.hoverEffect, Circle())
         }
         .buttonStyle(.plain)
-        .frame(width: 108)
+        .hoverEffectDisabled()
+        .onHover { microphoneHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: microphoneHovered)
+        .animation(.easeOut(duration: 0.12), value: model.isDictating)
         .opacity(model.isBusy ? 0.4 : 1)
         .disabled(model.isBusy)
         .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
+    }
+
+    private var microphoneColor: Color {
+        if model.isDictating { return .red }
+        if microphoneHovered { return .green }
+        return Color.secondary.opacity(0.45)
+    }
+
+    private var messagePrompt: String {
+        model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…"
     }
 
     private var projectTitle: String? {
@@ -831,6 +890,63 @@ struct ThreadDetailView: View {
         if committed.isEmpty { return volatile }
         if volatile.isEmpty { return committed }
         return "\(committed) \(volatile)"
+    }
+}
+
+private final class HardwareKeyboardTextView: UITextView {
+    private let suppressedSoftwareKeyboard = UIView(frame: .zero)
+
+    override var inputView: UIView? {
+        get { suppressedSoftwareKeyboard }
+        set {}
+    }
+}
+
+private struct HardwareKeyboardDraftEditor: UIViewRepresentable {
+    @SwiftUI.Environment(\.isEnabled) private var isEnabled
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = HardwareKeyboardTextView()
+        view.delegate = context.coordinator
+        view.backgroundColor = .clear
+        view.font = .preferredFont(forTextStyle: .body)
+        view.textColor = .label
+        view.adjustsFontForContentSizeCategory = true
+        view.isScrollEnabled = true
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.inputAssistantItem.leadingBarButtonGroups = []
+        view.inputAssistantItem.trailingBarButtonGroups = []
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text {
+            view.text = text
+        }
+        view.isEditable = isEnabled
+        view.isSelectable = true
+    }
+
+    static func dismantleUIView(_ view: UITextView, coordinator: Coordinator) {
+        view.resignFirstResponder()
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        @Binding private var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            text = textView.text
+        }
     }
 }
 
