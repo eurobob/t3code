@@ -80,7 +80,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `36c0bac0`.
+most recently at product commit `21839bde`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
