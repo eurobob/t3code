@@ -132,8 +132,10 @@ confirmation. Stop is present only while the live thread reports a running turn,
 and it and dictation Cancel are solid red/white buttons. Activity rows with
 server-projected detail can expand to reveal it.
 Live transcript following now yields as soon as the user manually scrolls and
-stays disabled until they explicitly select the `Latest` control or open another
-task. Scroll position and inertial movement never implicitly resume following.
+resumes when they explicitly select the `Latest` control, manually return to the
+bottom, or open another task. The control is driven by a geometry-derived bottom
+visibility Boolean, so it appears only while the transcript is actually away
+from the bottom; content and voice-dock growth do not expose it during follow.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
 
@@ -155,7 +157,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `70b9cfbe`.
+most recently at product commit `ab7f87a7`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
