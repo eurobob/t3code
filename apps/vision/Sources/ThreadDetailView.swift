@@ -908,6 +908,7 @@ struct ThreadDetailView: View {
     @State private var microphoneHovered = false
     @State private var voiceDockHeight: CGFloat = 0
     @State private var followsTranscriptBottom = true
+    @State private var transcriptIsAtBottom = true
     @State private var showsScriptOutput = false
 
     init(threadID: String) {
@@ -987,12 +988,24 @@ struct ThreadDetailView: View {
                     }
                     .padding(20)
                 }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { _ in
-                            followsTranscriptBottom = false
-                        }
-                )
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.visibleRect.maxY >= geometry.contentSize.height - 8
+                } action: { _, isAtBottom in
+                    transcriptIsAtBottom = isAtBottom
+                    if isAtBottom {
+                        followsTranscriptBottom = true
+                    }
+                }
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .interacting:
+                        followsTranscriptBottom = false
+                    case .idle where transcriptIsAtBottom:
+                        followsTranscriptBottom = true
+                    default:
+                        break
+                    }
+                }
                 .onChange(of: model.transcriptRevision) {
                     guard followsTranscriptBottom else { return }
                     proxy.scrollTo(transcriptBottomID, anchor: .bottom)
@@ -1008,7 +1021,7 @@ struct ThreadDetailView: View {
                     proxy.scrollTo(transcriptBottomID, anchor: .bottom)
                 }
                 .overlay(alignment: .bottom) {
-                    if !followsTranscriptBottom {
+                    if !followsTranscriptBottom, !transcriptIsAtBottom {
                         Button {
                             followsTranscriptBottom = true
                             proxy.scrollTo(transcriptBottomID, anchor: .bottom)
