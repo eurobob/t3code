@@ -103,10 +103,6 @@ fi
 # 4. Hand off to the Mac. Run from the wrapper so mac-verify picks up ITS origin (the
 #    private bare repo) rather than this monorepo's.
 say "handing off to the Mac build bridge"
-# This IS the human act mac-verify gates on: the deploy button, or a person running this
-# script deliberately. Agents calling mac-verify --deploy directly are refused and told to
-# ask instead, because a deploy launches on a headset someone may be wearing.
-export MESA_ALLOW_DEPLOY=1
 ARGS=(--scheme "$SCHEME" --deploy)
 [ "$LOGS" = "1" ] && ARGS+=(--logs)
 exec mac-verify "${ARGS[@]}"
