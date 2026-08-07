@@ -1109,11 +1109,8 @@ struct ThreadDetailView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
-                .accessibilityHint(
-                    model.isScriptRunning
-                        ? "The active task worktree is being deployed"
-                        : "Commits, pushes, and deploys this task's worktree"
-                )
+                .disabled(model.isScriptRunning || model.isTurnRunning)
+                .accessibilityHint(deployAccessibilityHint)
             }
         }
         .padding(.horizontal, 20)
@@ -1401,6 +1398,16 @@ struct ThreadDetailView: View {
         guard !model.isScriptRunning, let activeProject else { return }
         showsDeployError = false
         model.deploy(project: activeProject, using: appModel)
+    }
+
+    private var deployAccessibilityHint: String {
+        if model.isScriptRunning {
+            return "The active task worktree is being deployed"
+        }
+        if model.isTurnRunning {
+            return "Wait for the agent to finish changing this task's worktree"
+        }
+        return "Commits, pushes, and deploys this task's worktree"
     }
 
     private var voicePreview: String {
