@@ -408,6 +408,61 @@ final class AppModel {
         return try await client.interrupt(threadID: threadID, turnID: turnID)
     }
 
+    func openTerminal(
+        threadID: String,
+        terminalID: String,
+        cwd: String,
+        worktreePath: String?,
+        environmentVariables: [String: String]
+    ) async throws -> TerminalSessionSnapshot {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.openTerminal(
+            threadID: threadID,
+            terminalID: terminalID,
+            cwd: cwd,
+            worktreePath: worktreePath,
+            columns: 120,
+            rows: 36,
+            environmentVariables: environmentVariables
+        )
+    }
+
+    /// A scoped attach starts with authoritative history, then carries every
+    /// output event for this run. That avoids racing a global terminal stream
+    /// against the first bytes written by a fast script.
+    func attachTerminal(
+        threadID: String,
+        terminalID: String
+    ) async throws -> AsyncThrowingStream<TerminalEvent, Error> {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.attachTerminal(
+            threadID: threadID,
+            terminalID: terminalID
+        )
+    }
+
+    func writeTerminal(
+        threadID: String,
+        terminalID: String,
+        data: String
+    ) async throws {
+        guard let client else { throw ClientError.notConnected }
+        try await client.writeTerminal(
+            threadID: threadID,
+            terminalID: terminalID,
+            data: data
+        )
+    }
+
+    func closeTerminal(threadID: String, terminalID: String) async throws {
+        guard let client else { throw ClientError.notConnected }
+        try await client.closeTerminal(
+            threadID: threadID,
+            terminalID: terminalID,
+            deleteHistory: true
+        )
+    }
+
     func createThreadAndSend(
         projectID: String,
         title: String,

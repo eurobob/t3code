@@ -46,6 +46,40 @@ final class ThreadDetailModel {
         }
     }
 
+    enum ScriptActionState: Equatable {
+        case idle
+        case starting
+        case running
+        case succeeded
+        case failed(String)
+
+        var isRunning: Bool {
+            switch self {
+            case .starting, .running: true
+            case .idle, .succeeded, .failed: false
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .idle: "Ready"
+            case .starting: "Opening terminal…"
+            case .running: "Running…"
+            case .succeeded: "Finished successfully"
+            case let .failed(message): message
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .idle: "terminal"
+            case .starting, .running: "ellipsis"
+            case .succeeded: "checkmark.circle.fill"
+            case .failed: "xmark.circle.fill"
+            }
+        }
+    }
+
     private enum ActionError: LocalizedError {
         case threadUnavailable
         case eventStreamEnded
@@ -59,6 +93,26 @@ final class ThreadDetailModel {
                 "The thread event stream ended before the turn stopped."
             case let .interruptFailed(detail):
                 "The provider could not interrupt this turn: \(detail)"
+            }
+        }
+    }
+
+    private enum ScriptError: LocalizedError {
+        case threadUnavailable
+        case terminalStreamEnded
+        case terminalClosed
+        case terminalFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .threadUnavailable:
+                "The thread state is not available yet."
+            case .terminalStreamEnded:
+                "Terminal output stopped before the deploy command finished."
+            case .terminalClosed:
+                "The terminal closed before the deploy command finished."
+            case let .terminalFailed(message):
+                message
             }
         }
     }
@@ -79,6 +133,10 @@ final class ThreadDetailModel {
     private(set) var dictationPhase: DictationPhase = .idle
     private(set) var volatileDictation = ""
     private(set) var dictationError: String?
+    private(set) var scriptActionState: ScriptActionState = .idle
+    private(set) var activeScriptName: String?
+    private(set) var scriptOutput = ""
+    private(set) var scriptOutputWasTruncated = false
     private(set) var submissionRevision = 0
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
@@ -90,6 +148,10 @@ final class ThreadDetailModel {
     private var refreshTask: Task<Void, Never>?
     @ObservationIgnored
     private var actionTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var scriptTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var scriptCompletionMarker: String?
     @ObservationIgnored
     private var refreshGeneration = 0
     @ObservationIgnored
@@ -126,6 +188,23 @@ final class ThreadDetailModel {
     var isBusy: Bool { actionState != .idle }
 
     var isDictating: Bool { dictationPhase != .idle }
+
+    var isScriptRunning: Bool { scriptActionState.isRunning }
+
+    var visibleScriptOutput: String {
+        let normalized = scriptOutput
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let visible = normalized
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                guard let scriptCompletionMarker else { return true }
+                return !line.contains(scriptCompletionMarker)
+            }
+            .joined(separator: "\n")
+        guard scriptOutputWasTruncated else { return visible }
+        return "[Earlier terminal output omitted]\n\(visible)"
+    }
 
     var isTurnRunning: Bool {
         guard let thread else { return false }
@@ -226,6 +305,39 @@ final class ThreadDetailModel {
         }
     }
 
+    func runScript(
+        _ script: ProjectScript,
+        project: OrchestrationProject,
+        using appModel: AppModel
+    ) {
+        guard scriptTask == nil else { return }
+        guard let thread else {
+            scriptActionState = .failed(
+                ScriptError.threadUnavailable.localizedDescription
+            )
+            return
+        }
+
+        activeScriptName = script.name
+        scriptActionState = .starting
+        scriptOutput = ""
+        scriptOutputWasTruncated = false
+        let marker = "__T3_VISION_SCRIPT_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__:"
+        scriptCompletionMarker = marker
+
+        scriptTask = Task { [weak self, weak appModel] in
+            guard let self, let appModel else { return }
+            await performScript(
+                script,
+                project: project,
+                thread: thread,
+                completionMarker: marker,
+                using: appModel
+            )
+            scriptTask = nil
+        }
+    }
+
     func beginDictation(vocabulary: [String]) {
         guard !isBusy else {
             dictationError = "Wait for the current thread action to finish."
@@ -317,6 +429,154 @@ final class ThreadDetailModel {
             draft.removeLast(committedDictation.count)
         }
         committedDictation = ""
+    }
+
+    private func performScript(
+        _ script: ProjectScript,
+        project: OrchestrationProject,
+        thread: OrchestrationThread,
+        completionMarker: String,
+        using appModel: AppModel
+    ) async {
+        let terminalID = "vision-script-\(UUID().uuidString.lowercased())"
+        let worktreePath = thread.worktreePath
+        let cwd = worktreePath ?? project.workspaceRoot
+        var environmentVariables = [
+            "T3CODE_PROJECT_ROOT": project.workspaceRoot,
+        ]
+        if let worktreePath {
+            environmentVariables["T3CODE_WORKTREE_PATH"] = worktreePath
+        }
+        var terminalOpened = false
+
+        do {
+            let opened = try await appModel.openTerminal(
+                threadID: thread.id,
+                terminalID: terminalID,
+                cwd: cwd,
+                worktreePath: worktreePath,
+                environmentVariables: environmentVariables
+            )
+            terminalOpened = true
+            replaceScriptOutput(with: opened.history)
+
+            let stream = try await appModel.attachTerminal(
+                threadID: thread.id,
+                terminalID: terminalID
+            )
+            var iterator = stream.makeAsyncIterator()
+            guard let initial = try await iterator.next() else {
+                throw ScriptError.terminalStreamEnded
+            }
+            if let snapshot = initial.snapshot {
+                replaceScriptOutput(with: snapshot.history)
+            } else if initial.type == "error" {
+                throw ScriptError.terminalFailed(
+                    initial.message ?? "The terminal could not start."
+                )
+            }
+
+            // The exit marker makes even an immediate guard failure observable;
+            // subprocess activity polling alone can miss commands shorter than
+            // its one-second interval.
+            let completionCommand =
+                "printf '\\n\(completionMarker)%s\\n' \"$?\""
+            try await appModel.writeTerminal(
+                threadID: thread.id,
+                terminalID: terminalID,
+                data: "\(script.command)\r\(completionCommand)\r"
+            )
+            scriptActionState = .running
+
+            var completed = false
+            while let event = try await iterator.next() {
+                if let eventThreadID = event.threadId,
+                   let eventTerminalID = event.terminalId,
+                   (eventThreadID != thread.id || eventTerminalID != terminalID) {
+                    continue
+                }
+
+                switch event.type {
+                case "snapshot", "started", "restarted":
+                    if let snapshot = event.snapshot {
+                        replaceScriptOutput(with: snapshot.history)
+                    }
+                case "output":
+                    if let data = event.data {
+                        appendScriptOutput(data)
+                    }
+                case "cleared":
+                    scriptOutput = ""
+                    scriptOutputWasTruncated = false
+                case "error":
+                    throw ScriptError.terminalFailed(
+                        event.message ?? "The terminal reported an error."
+                    )
+                case "closed", "exited":
+                    throw ScriptError.terminalClosed
+                default:
+                    break
+                }
+
+                if let exitCode = scriptExitCode(
+                    in: scriptOutput,
+                    completionMarker: completionMarker
+                ) {
+                    scriptActionState = exitCode == 0
+                        ? .succeeded
+                        : .failed("Command exited with status \(exitCode).")
+                    completed = true
+                    break
+                }
+            }
+            if !completed {
+                throw ScriptError.terminalStreamEnded
+            }
+        } catch is CancellationError {
+            scriptActionState = .failed("Terminal output monitoring was cancelled.")
+        } catch {
+            scriptActionState = .failed(error.localizedDescription)
+        }
+
+        if terminalOpened {
+            try? await appModel.closeTerminal(
+                threadID: thread.id,
+                terminalID: terminalID
+            )
+        }
+    }
+
+    private func replaceScriptOutput(with output: String) {
+        scriptOutput = ""
+        scriptOutputWasTruncated = false
+        appendScriptOutput(output)
+    }
+
+    private func appendScriptOutput(_ output: String) {
+        scriptOutput.append(contentsOf: output)
+        guard scriptOutput.count > 200_000 else { return }
+        scriptOutput = String(scriptOutput.suffix(160_000))
+        scriptOutputWasTruncated = true
+    }
+
+    private func scriptExitCode(
+        in output: String,
+        completionMarker: String
+    ) -> Int? {
+        var searchStart = output.startIndex
+        while searchStart < output.endIndex,
+              let markerRange = output.range(
+                  of: completionMarker,
+                  range: searchStart..<output.endIndex
+              ) {
+            let suffix = output[markerRange.upperBound...]
+            let digits = suffix.prefix { $0.isNumber }
+            if !digits.isEmpty, let exitCode = Int(String(digits)) {
+                return exitCode
+            }
+            searchStart = markerRange.upperBound
+        }
+        return nil
     }
 
     private func startEvents(after sequence: Int, using appModel: AppModel) {
@@ -648,6 +908,7 @@ struct ThreadDetailView: View {
     @State private var microphoneHovered = false
     @State private var voiceDockHeight: CGFloat = 0
     @State private var followsTranscriptBottom = true
+    @State private var showsScriptOutput = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -681,6 +942,9 @@ struct ThreadDetailView: View {
         }
         .onChange(of: model.draftRestorationRevision) {
             draftEditorMode = prefersHardwareEditor ? .hardwareKeyboard : .softwareKeyboard
+        }
+        .sheet(isPresented: $showsScriptOutput) {
+            ScriptRunOutputView(model: model)
         }
         .onDisappear { model.stop() }
     }
@@ -798,6 +1062,45 @@ struct ThreadDetailView: View {
                 }
             }
             Spacer()
+            if let primaryDeployScript {
+                Button {
+                    runDeployScript(primaryDeployScript)
+                } label: {
+                    if model.isScriptRunning {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Deploying…")
+                        }
+                    } else {
+                        Label("Deploy", systemImage: scriptSystemImage(primaryDeployScript))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .accessibilityHint(
+                    model.isScriptRunning
+                        ? "Shows live deployment output"
+                        : "Runs \(primaryDeployScript.name) in this task's worktree"
+                )
+
+                if deployScripts.count > 1 {
+                    Menu {
+                        ForEach(Array(deployScripts.dropFirst())) { script in
+                            Button {
+                                runDeployScript(script)
+                            } label: {
+                                Label(script.name, systemImage: scriptSystemImage(script))
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isScriptRunning)
+                    .accessibilityLabel("More deploy actions")
+                }
+            }
             if model.isTurnRunning {
                 Button(role: .destructive) {
                     model.interrupt(using: appModel)
@@ -1084,8 +1387,37 @@ struct ThreadDetailView: View {
     }
 
     private var projectTitle: String? {
+        activeProject?.title
+    }
+
+    private var activeProject: OrchestrationProject? {
         guard let projectID = model.thread?.projectId else { return nil }
-        return appModel.snapshot?.projects.first { $0.id == projectID }?.title
+        return appModel.snapshot?.projects.first { $0.id == projectID }
+    }
+
+    private var deployScripts: [ProjectScript] {
+        (activeProject?.scripts ?? []).filter {
+            !$0.runOnWorktreeCreate
+                && $0.name.localizedCaseInsensitiveContains("deploy")
+        }
+    }
+
+    private var primaryDeployScript: ProjectScript? {
+        deployScripts.first
+    }
+
+    private func runDeployScript(_ script: ProjectScript) {
+        showsScriptOutput = true
+        guard !model.isScriptRunning, let activeProject else { return }
+        model.runScript(script, project: activeProject, using: appModel)
+    }
+
+    private func scriptSystemImage(_ script: ProjectScript) -> String {
+        switch script.icon {
+        case "build": "hammer.fill"
+        case "debug": "ladybug.fill"
+        default: "play.fill"
+        }
     }
 
     private var voicePreview: String {
@@ -1094,6 +1426,93 @@ struct ThreadDetailView: View {
         if committed.isEmpty { return volatile }
         if volatile.isEmpty { return committed }
         return "\(committed) \(volatile)"
+    }
+}
+
+private struct ScriptRunOutputView: View {
+    let model: ThreadDetailModel
+
+    @SwiftUI.Environment(\.dismiss) private var dismiss
+    @State private var followsOutputBottom = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                if model.scriptActionState.isRunning {
+                    ProgressView()
+                } else {
+                    Image(systemName: model.scriptActionState.systemImage)
+                        .foregroundStyle(statusColor)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.activeScriptName ?? "Deploy")
+                        .font(.headline)
+                    Text(model.scriptActionState.label)
+                        .font(.caption)
+                        .foregroundStyle(statusColor)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button(model.scriptActionState.isRunning ? "Hide" : "Done") {
+                    dismiss()
+                }
+            }
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(outputText)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(16)
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id("script-output-bottom")
+                }
+                .background(Color.primary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { _ in
+                            followsOutputBottom = false
+                        }
+                )
+                .onChange(of: model.scriptOutput.count) {
+                    guard followsOutputBottom else { return }
+                    proxy.scrollTo("script-output-bottom", anchor: .bottom)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsOutputBottom {
+                        Button {
+                            followsOutputBottom = true
+                            proxy.scrollTo("script-output-bottom", anchor: .bottom)
+                        } label: {
+                            Label("Latest", systemImage: "arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .padding(12)
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 620, minHeight: 440)
+    }
+
+    private var outputText: String {
+        model.visibleScriptOutput.isEmpty
+            ? "Waiting for terminal output…"
+            : model.visibleScriptOutput
+    }
+
+    private var statusColor: Color {
+        switch model.scriptActionState {
+        case .failed: .red
+        case .succeeded: .green
+        case .idle, .starting, .running: .secondary
+        }
     }
 }
 

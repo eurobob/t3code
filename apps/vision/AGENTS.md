@@ -137,6 +137,13 @@ task. Scroll position and inertial movement never implicitly resume following.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
 
+Threads whose project advertises deploy scripts now show a direct Deploy action
+in the task header, with additional deploy variants in its adjacent menu. The
+action runs the selected project script in that thread's worktree through the
+existing terminal RPCs and presents bounded live output plus the command's real
+exit status. The terminal subscription is established before the command is
+written, so immediate guard failures are not lost.
+
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
 another terminal state if completion wins the race), then send the redirect as
