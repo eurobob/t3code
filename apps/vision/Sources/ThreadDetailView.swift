@@ -1805,7 +1805,10 @@ private struct MessageBubble: View {
                     .foregroundStyle(.secondary)
                     .italic()
             } else {
-                Text(message.text)
+                MarkdownMessageView(
+                    message.text,
+                    isStreaming: message.streaming
+                )
                     .textSelection(.enabled)
             }
 

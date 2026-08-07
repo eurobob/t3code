@@ -49,6 +49,15 @@ targets:
       # PlatformDeepLinks parses pairing links through this. Foundation-only.
       - path: ../swift-ios/Features/Connection/ConnectionDetails.swift
         name: ConnectionDetails
+      # Chat Markdown is native SwiftUI and Foundation. Referencing the iOS
+      # implementation keeps parsing and streaming behavior aligned without
+      # adding a web view or another Markdown dependency.
+      - path: ../swift-ios/Features/Chat/MarkdownDocument.swift
+        name: MarkdownDocument
+      - path: ../swift-ios/Features/Chat/MarkdownRenderCache.swift
+        name: MarkdownRenderCache
+      - path: ../swift-ios/Features/Chat/MarkdownMessageView.swift
+        name: MarkdownMessageView
     dependencies:
       - package: Clerk
         product: ClerkKit
