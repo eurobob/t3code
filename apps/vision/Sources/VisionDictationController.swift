@@ -122,7 +122,11 @@ final class VisionDictationController {
 
     private func configureAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default, options: [.duckOthers])
+        try session.setCategory(
+            .record,
+            mode: .default,
+            options: [.duckOthers, .allowBluetoothHFP]
+        )
         try session.setActive(true)
     }
 

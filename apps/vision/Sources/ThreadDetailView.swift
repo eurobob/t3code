@@ -545,9 +545,9 @@ final class ThreadDetailModel {
 
 struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
-    @SwiftUI.Environment(\.openWindow) private var openWindow
     @State private var model: ThreadDetailModel
     @State private var dictationGestureActive = false
+    @State private var showingTextInput = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -568,16 +568,7 @@ struct ThreadDetailView: View {
                 transcript
             }
         }
-        .navigationTitle(model.thread?.title ?? "Thread")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    openWindow(id: "thread", value: model.threadID)
-                } label: {
-                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
-                }
-            }
-        }
+        .navigationTitle("")
         .task { await model.start(using: appModel) }
         .onDisappear { model.stop() }
     }
@@ -617,21 +608,23 @@ struct ThreadDetailView: View {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
             }
-        }
-        .ornament(
-            attachmentAnchor: .scene(.bottom),
-            contentAlignment: .bottom
-        ) {
-            composer
+
+            Divider()
+            voiceDock
         }
     }
 
     private var threadStateBar: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Session \(model.sessionStatus) · Turn \(model.turnState)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let projectTitle {
+                    Text(projectTitle.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
+                Text(model.thread?.title ?? "Task")
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
                 if let label = model.actionState.label {
                     HStack(spacing: 7) {
                         ProgressView()
@@ -639,32 +632,41 @@ struct ThreadDetailView: View {
                         Text(label)
                     }
                     .font(.caption)
+                } else {
+                    Label(
+                        model.isTurnRunning ? "Agent is working" : "Ready",
+                        systemImage: model.isTurnRunning ? "circle.fill" : "circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(model.isTurnRunning ? Color.green : Color.secondary)
                 }
             }
             Spacer()
             Button(role: .destructive) {
                 model.interrupt(using: appModel)
             } label: {
-                Label("Interrupt", systemImage: "stop.fill")
+                Label("Stop", systemImage: "stop.fill")
             }
+            .buttonStyle(.bordered)
             .disabled(model.isBusy)
             .accessibilityHint("Always dispatches an interrupt using the latest known turn ID")
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
     }
 
-    private var composer: some View {
+    private var voiceDock: some View {
         @Bindable var model = model
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(spacing: 12) {
             if let error = model.dictationError ?? model.actionError {
                 Label(error, systemImage: "exclamationmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else if let label = model.dictationPhase.label {
                 HStack(spacing: 8) {
                     Image(systemName: "waveform")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.white)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(label)
                             .font(.caption.weight(.semibold))
@@ -685,16 +687,46 @@ struct ThreadDetailView: View {
                 Text(notice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(alignment: .bottom, spacing: 10) {
+            if showingTextInput {
                 TextField(
                     model.isTurnRunning ? "Redirect the running agent…" : "Message the agent…",
                     text: $model.draft,
                     axis: .vertical
                 )
-                .lineLimit(1...6)
+                .lineLimit(1...4)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(Color.white.opacity(0.09))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .disabled(model.isBusy)
+            } else if !voicePreview.isEmpty {
+                Text(voicePreview)
+                    .font(.body)
+                    .foregroundStyle(.white)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.09))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            HStack(alignment: .center, spacing: 18) {
+                Button {
+                    showingTextInput.toggle()
+                } label: {
+                    Label(
+                        showingTextInput ? "Hide Text" : "Type Instead",
+                        systemImage: "keyboard"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 dictationButton
 
@@ -707,53 +739,87 @@ struct ThreadDetailView: View {
                     )
                 }
                 .buttonStyle(.borderedProminent)
+                .frame(maxWidth: .infinity, alignment: .trailing)
                 .disabled(
                     model.isBusy
                         || model.isDictating
                         || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                    )
             }
+
+            Text(
+                model.isTurnRunning
+                    ? "Speaking now will stop and redirect the agent."
+                    : "Hold to talk · release to review"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-        .padding(16)
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .frame(width: 680)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(Color(white: 0.075))
     }
 
     private var dictationButton: some View {
-        Image(systemName: model.isDictating ? "waveform" : "mic.fill")
-            .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(model.isDictating ? Color.white : Color.primary)
-            .frame(width: 42, height: 42)
-            .background(
-                model.isDictating ? Color.red : Color.secondary.opacity(0.16),
-                in: Circle()
-            )
-            .contentShape(Circle())
-            .opacity(model.isBusy ? 0.4 : 1)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard !dictationGestureActive, !model.isBusy else { return }
-                        dictationGestureActive = true
-                        model.beginDictation(vocabulary: appModel.dictationVocabulary)
-                    }
-                    .onEnded { _ in
-                        guard dictationGestureActive else { return }
-                        dictationGestureActive = false
-                        model.finishDictation()
-                    }
-            )
-            .accessibilityElement()
-            .accessibilityLabel(model.isDictating ? "Finish dictation" : "Hold to dictate")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction {
-                if model.isDictating {
-                    model.finishDictation()
-                } else {
+        VStack(spacing: 5) {
+            Image(systemName: model.isDictating ? "waveform" : "mic.fill")
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 88, height: 88)
+                .background(
+                    model.isDictating ? Color.red : Color.accentColor,
+                    in: Circle()
+                )
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.75), lineWidth: 2)
+                        .padding(5)
+                }
+            Text(model.isDictating ? "Listening" : "Hold to Talk")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 118)
+        .contentShape(Rectangle())
+        .opacity(model.isBusy ? 0.4 : 1)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !dictationGestureActive, !model.isBusy else { return }
+                    dictationGestureActive = true
+                    showingTextInput = false
                     model.beginDictation(vocabulary: appModel.dictationVocabulary)
                 }
+                .onEnded { _ in
+                    guard dictationGestureActive else { return }
+                    dictationGestureActive = false
+                    model.finishDictation()
+                }
+        )
+        .accessibilityElement()
+        .accessibilityLabel(model.isDictating ? "Finish dictation" : "Hold to dictate")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            if model.isDictating {
+                model.finishDictation()
+            } else {
+                showingTextInput = false
+                model.beginDictation(vocabulary: appModel.dictationVocabulary)
             }
+        }
+    }
+
+    private var projectTitle: String? {
+        guard let projectID = model.thread?.projectId else { return nil }
+        return appModel.snapshot?.projects.first { $0.id == projectID }?.title
+    }
+
+    private var voicePreview: String {
+        let committed = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let volatile = model.volatileDictation.trimmingCharacters(in: .whitespacesAndNewlines)
+        if committed.isEmpty { return volatile }
+        if volatile.isEmpty { return committed }
+        return "\(committed) \(volatile)"
     }
 }
 

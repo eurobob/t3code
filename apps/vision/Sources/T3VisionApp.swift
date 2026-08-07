@@ -10,7 +10,7 @@ struct T3VisionApp: App {
                 .environment(model)
                 .task { await model.restore() }
         }
-        .defaultSize(width: 720, height: 900)
+        .defaultSize(width: 1_120, height: 820)
 
         WindowGroup(id: "thread", for: String.self) { threadID in
             Group {

@@ -6,6 +6,7 @@ struct VisionModelOption: Identifiable, Equatable {
     let providerName: String
     let modelName: String
     let selection: ModelSelection
+    let optionDescriptors: [ServerProviderOptionDescriptor]
 
     var id: String { "\(selection.instanceId):\(selection.model)" }
     var label: String { "\(providerName) · \(modelName)" }
@@ -51,6 +52,8 @@ final class AppModel {
 
     let connect = T3ConnectController()
 
+    @ObservationIgnored
+    private let environmentStore = EnvironmentStore()
     private let credentialStore = KeychainCredentialStore(
         service: "codes.t3.vision.environment-credentials"
     )
@@ -58,7 +61,7 @@ final class AppModel {
     // cannot coexist with — and this is plumbing the UI never observes anyway.
     @ObservationIgnored
     private lazy var runtime = EnvironmentRuntime(
-        environmentStore: EnvironmentStore(),
+        environmentStore: environmentStore,
         credentialStore: credentialStore,
         managedAuthorization: T3ConnectRuntimeAuthorization(controller: connect)
     )
@@ -68,7 +71,7 @@ final class AppModel {
 
     @ObservationIgnored
     private lazy var pairingService = PairingService(
-        environmentStore: EnvironmentStore(),
+        environmentStore: environmentStore,
         credentialStore: credentialStore
     )
 
@@ -104,7 +107,8 @@ final class AppModel {
                         selection: ModelSelection(
                             instanceId: provider.instanceId,
                             model: model.slug
-                        )
+                        ),
+                        optionDescriptors: model.capabilities?.optionDescriptors ?? []
                     )
                 }
         }
@@ -119,7 +123,8 @@ final class AppModel {
             return VisionModelOption(
                 providerName: selection.instanceId,
                 modelName: selection.model,
-                selection: selection
+                selection: selection,
+                optionDescriptors: []
             )
         }
     }
@@ -165,16 +170,13 @@ final class AppModel {
         account = connect.account
         cloudEnvironments = connect.environments
 
-        if account == nil {
-            phase = .signedOut
-            return
-        }
-
-        if let saved = try? await runtime.environments(), let existing = saved.first {
+        // Direct pairing is independent of Clerk. Check the locally persisted
+        // environment and Keychain credential before deciding the user is signed out.
+        if let existing = try? await runtime.activeEnvironment() {
             await adopt(existing)
             return
         }
-        phase = .choosingEnvironment
+        phase = account == nil ? .signedOut : .choosingEnvironment
     }
 
     /// Drives Clerk's OAuth flow directly, since ClerkKitUI's `AuthView` is

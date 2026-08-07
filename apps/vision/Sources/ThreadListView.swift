@@ -1,10 +1,5 @@
 import SwiftUI
 
-enum VisionRoute: Hashable {
-    case project(String)
-    case thread(String)
-}
-
 private enum ThreadFilter: String, CaseIterable, Hashable, Identifiable {
     case active
     case archived
@@ -13,22 +8,31 @@ private enum ThreadFilter: String, CaseIterable, Hashable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+private enum VisionSelection: Hashable {
+    case thread(String)
+    case newTask(UUID, projectID: String?)
+    case newProject(UUID)
+}
+
 struct ThreadListView: View {
     @SwiftUI.Environment(AppModel.self) private var model
 
-    @State private var path: [VisionRoute] = []
+    @AppStorage("vision.tasks.groupByProject") private var groupByProject = false
+    @State private var selection: VisionSelection?
     @State private var filter = ThreadFilter.active
     @State private var searchText = ""
-    @State private var showingNewTask = false
-    @State private var showingNewProject = false
-    @State private var initialProjectID: String?
     @State private var renameTarget: OrchestrationThreadShell?
+    @State private var renameDraft = ""
     @State private var actionError: String?
 
     private var projects: [OrchestrationProject] {
         (model.snapshot?.projects ?? [])
             .filter { $0.deletedAt == nil }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    private var projectsByID: [String: OrchestrationProject] {
+        Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
     }
 
     private var sourceThreads: [OrchestrationThreadShell] {
@@ -40,47 +44,50 @@ struct ThreadListView: View {
         }
     }
 
+    private var visibleThreads: [OrchestrationThreadShell] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ordered(sourceThreads.filter { thread in
+            guard !query.isEmpty else { return true }
+            return thread.title.lowercased().contains(query)
+                || thread.branch?.lowercased().contains(query) == true
+                || projectsByID[thread.projectId]?.title.lowercased().contains(query) == true
+        })
+    }
+
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                if projects.isEmpty {
-                    ContentUnavailableView {
-                        Label("No projects", systemImage: "folder.badge.plus")
-                    } description: {
-                        Text("Add a workspace, then start a task on it.")
-                    } actions: {
-                        Button("New Project") { showingNewProject = true }
+        NavigationSplitView {
+            sidebar
+                .navigationTitle("Tasks")
+                .searchable(text: $searchText, prompt: "Search tasks")
+                .toolbar { sidebarToolbar }
+                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 360)
+        } detail: {
+            NavigationStack {
+                detail
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+        .alert(
+            "Rename Task",
+            isPresented: Binding(
+                get: { renameTarget != nil },
+                set: {
+                    if !$0 {
+                        renameTarget = nil
+                        renameDraft = ""
                     }
-                } else {
-                    taskList
                 }
+            )
+        ) {
+            TextField("Task name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {
+                renameTarget = nil
+                renameDraft = ""
             }
-            .navigationTitle(model.environment?.label ?? "T3 Code")
-            .navigationDestination(for: VisionRoute.self) { route in
-                switch route {
-                case let .project(projectID):
-                    ProjectDetailView(projectID: projectID, path: $path)
-                case let .thread(threadID):
-                    ThreadDetailView(threadID: threadID)
-                }
-            }
-            .searchable(text: $searchText, prompt: "Search tasks")
-            .toolbar { toolbarContent }
-        }
-        .sheet(isPresented: $showingNewTask) {
-            NewTaskView(projectID: initialProjectID) { threadID in
-                path.append(.thread(threadID))
-            }
-            .environment(model)
-        }
-        .sheet(isPresented: $showingNewProject) {
-            NewProjectView()
-                .environment(model)
-        }
-        .sheet(item: $renameTarget) { thread in
-            RenameTaskView(thread: thread) { title in
-                perform { try await model.rename(threadID: thread.id, title: title) }
-            }
+            Button("Save") { finishRename() }
+                .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Choose a short name that makes this task easy to find.")
         }
         .alert(
             "Task action failed",
@@ -95,67 +102,66 @@ struct ThreadListView: View {
         }
     }
 
-    private var taskList: some View {
-        List {
-            ForEach(projects) { project in
+    @ViewBuilder
+    private var sidebar: some View {
+        if projects.isEmpty && visibleThreads.isEmpty {
+            ContentUnavailableView {
+                Label("No tasks", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("Add a workspace, then start a task on it.")
+            } actions: {
+                Button("New Project") { selection = .newProject(UUID()) }
+            }
+        } else if visibleThreads.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        } else {
+            List(selection: $selection) {
+                if groupByProject {
+                    groupedTaskRows
+                } else {
+                    flatTaskRows
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    private var flatTaskRows: some View {
+        ForEach(visibleThreads) { thread in
+            taskLink(
+                thread,
+                projectTitle: projectsByID[thread.projectId]?.title
+            )
+        }
+        .onMove { source, destination in
+            guard filter == .active, searchText.isEmpty else { return }
+            moveThreads(visibleThreads, from: source, to: destination)
+        }
+    }
+
+    private var groupedTaskRows: some View {
+        ForEach(projects) { project in
+            let projectThreads = visibleThreads.filter { $0.projectId == project.id }
+            if !projectThreads.isEmpty {
                 Section {
-                    let projectThreads = threads(for: project.id)
-                    if projectThreads.isEmpty {
-                        Text(filter == .active ? "No active tasks" : "No archived tasks")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(projectThreads) { thread in
-                            NavigationLink(value: VisionRoute.thread(thread.id)) {
-                                ThreadRow(
-                                    thread: thread,
-                                    onPin: {
-                                        perform {
-                                            try await model.pin(
-                                                threadID: thread.id,
-                                                pinned: thread.pinnedAt == nil
-                                            )
-                                        }
-                                    },
-                                    onSettle: {
-                                        perform {
-                                            try await model.settle(
-                                                threadID: thread.id,
-                                                settled: thread.settledAt == nil
-                                            )
-                                        }
-                                    },
-                                    onRename: { renameTarget = thread },
-                                    onArchive: {
-                                        perform {
-                                            try await model.archive(
-                                                threadID: thread.id,
-                                                archived: thread.archivedAt == nil
-                                            )
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                        .onMove { source, destination in
-                            guard filter == .active else { return }
-                            moveThreads(
-                                projectID: project.id,
-                                from: source,
-                                to: destination
-                            )
-                        }
+                    ForEach(projectThreads) { thread in
+                        taskLink(thread, projectTitle: nil)
+                    }
+                    .onMove { source, destination in
+                        guard filter == .active, searchText.isEmpty else { return }
+                        moveThreads(projectThreads, from: source, to: destination)
                     }
                 } header: {
-                    HStack {
-                        NavigationLink(value: VisionRoute.project(project.id)) {
-                            Label(project.title, systemImage: "folder")
-                        }
+                    HStack(spacing: 6) {
+                        Text(project.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         Spacer()
                         Button {
-                            initialProjectID = project.id
-                            showingNewTask = true
+                            selection = .newTask(UUID(), projectID: project.id)
                         } label: {
-                            Image(systemName: "plus.circle")
+                            Image(systemName: "plus")
+                                .font(.caption)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("New task in \(project.title)")
@@ -165,14 +171,87 @@ struct ThreadListView: View {
         }
     }
 
+    private func taskLink(
+        _ thread: OrchestrationThreadShell,
+        projectTitle: String?
+    ) -> some View {
+        NavigationLink(value: VisionSelection.thread(thread.id)) {
+            ThreadRow(
+                thread: thread,
+                projectTitle: projectTitle,
+                onPin: {
+                    perform {
+                        try await model.pin(
+                            threadID: thread.id,
+                            pinned: thread.pinnedAt == nil
+                        )
+                    }
+                },
+                onSettle: {
+                    perform {
+                        try await model.settle(
+                            threadID: thread.id,
+                            settled: thread.settledAt == nil
+                        )
+                    }
+                },
+                onRename: {
+                    renameDraft = thread.title
+                    renameTarget = thread
+                },
+                onArchive: {
+                    perform {
+                        try await model.archive(
+                            threadID: thread.id,
+                            archived: thread.archivedAt == nil
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case let .thread(threadID):
+            ThreadDetailView(threadID: threadID)
+        case let .newTask(requestID, projectID):
+            NewTaskView(
+                projectID: projectID,
+                onCancel: { selection = nil },
+                onCreated: { selection = .thread($0) }
+            )
+            .id(requestID)
+        case let .newProject(requestID):
+            NewProjectView(
+                onCancel: { selection = nil },
+                onCreated: { selection = nil }
+            )
+            .id(requestID)
+        case nil:
+            ContentUnavailableView {
+                Label("Select a task", systemImage: "bubble.left.and.bubble.right")
+            } description: {
+                Text("Choose a task from the sidebar or start a new one.")
+            } actions: {
+                Button("New Task") {
+                    selection = .newTask(UUID(), projectID: nil)
+                }
+                .disabled(projects.isEmpty)
+            }
+        }
+    }
+
     @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
+    private var sidebarToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
-            EditButton()
-                .disabled(
-                    filter == .archived
-                        || !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+            Button {
+                selection = .newTask(UUID(), projectID: nil)
+            } label: {
+                Label("New Task", systemImage: "plus")
+            }
+            .disabled(projects.isEmpty)
 
             Menu {
                 Picker("Show", selection: $filter) {
@@ -180,64 +259,61 @@ struct ThreadListView: View {
                         Text(filter.title).tag(filter)
                     }
                 }
+                Toggle("Group by Project", isOn: $groupByProject)
                 Divider()
                 Button {
-                    initialProjectID = nil
-                    showingNewTask = true
-                } label: {
-                    Label("New Task", systemImage: "plus.bubble")
-                }
-                Button {
-                    showingNewProject = true
+                    selection = .newProject(UUID())
                 } label: {
                     Label("New Project", systemImage: "folder.badge.plus")
                 }
                 Divider()
                 Button("Disconnect") { Task { await model.signOut() } }
             } label: {
-                Label("Actions", systemImage: "ellipsis.circle")
+                Label("Task List Options", systemImage: "ellipsis.circle")
             }
         }
     }
 
-    private func threads(for projectID: String) -> [OrchestrationThreadShell] {
+    private func ordered(
+        _ threads: [OrchestrationThreadShell]
+    ) -> [OrchestrationThreadShell] {
         let order = Dictionary(uniqueKeysWithValues: model.threadOrder.enumerated().map {
             ($0.element, $0.offset)
         })
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return sourceThreads
-            .filter { thread in
-                guard thread.projectId == projectID else { return false }
-                guard !query.isEmpty else { return true }
-                return thread.title.lowercased().contains(query)
-                    || thread.branch?.lowercased().contains(query) == true
-            }
-            .sorted { left, right in
-                switch (order[left.id], order[right.id]) {
-                case let (leftIndex?, rightIndex?):
-                    return leftIndex < rightIndex
-                case (.some, .none):
-                    return true
-                case (.none, .some):
-                    return false
-                case (.none, .none):
-                    if (left.pinnedAt != nil) != (right.pinnedAt != nil) {
-                        return left.pinnedAt != nil
-                    }
-                    return left.updatedAt > right.updatedAt
+        return threads.sorted { left, right in
+            switch (order[left.id], order[right.id]) {
+            case let (leftIndex?, rightIndex?):
+                return leftIndex < rightIndex
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                if (left.pinnedAt != nil) != (right.pinnedAt != nil) {
+                    return left.pinnedAt != nil
                 }
+                return left.updatedAt > right.updatedAt
             }
+        }
     }
 
     private func moveThreads(
-        projectID: String,
+        _ threads: [OrchestrationThreadShell],
         from source: IndexSet,
         to destination: Int
     ) {
-        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        var ids = threads(for: projectID).map(\.id)
+        var ids = threads.map(\.id)
         ids.move(fromOffsets: source, toOffset: destination)
         model.setThreadOrder(ids)
+    }
+
+    private func finishRename() {
+        guard let thread = renameTarget else { return }
+        let title = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        renameTarget = nil
+        renameDraft = ""
+        perform { try await model.rename(threadID: thread.id, title: title) }
     }
 
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
@@ -255,42 +331,51 @@ private struct ThreadRow: View {
     @SwiftUI.Environment(\.openWindow) private var openWindow
 
     let thread: OrchestrationThreadShell
+    let projectTitle: String?
     let onPin: () -> Void
     let onSettle: () -> Void
     let onRename: () -> Void
     let onArchive: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
+        VStack(alignment: .leading, spacing: 3) {
+            if let projectTitle {
+                Text(projectTitle.uppercased())
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 5) {
                 Text(thread.title)
-                    .font(.headline)
+                    .font(.body.weight(.medium))
                     .lineLimit(2)
                 if thread.pinnedAt != nil {
                     Image(systemName: "pin.fill")
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            HStack(spacing: 10) {
-                if let branch = thread.branch {
-                    Label(branch, systemImage: "arrow.trianglehead.branch")
-                }
+            HStack(spacing: 8) {
                 if let status = thread.session?.status,
                    status == "starting" || status == "running" {
-                    Label(status.capitalized, systemImage: "circle.dotted")
+                    Label("Working", systemImage: "circle.fill")
                         .foregroundStyle(.green)
+                } else if thread.settledAt != nil {
+                    Label("Done", systemImage: "checkmark.circle.fill")
+                } else {
+                    Label("Ready", systemImage: "circle")
                 }
                 if thread.hasPendingApprovals || thread.hasPendingUserInput {
                     Label("Needs input", systemImage: "exclamationmark.circle.fill")
                         .foregroundStyle(.orange)
                 }
             }
-            .font(.caption)
+            .font(.caption2)
             .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
         .contextMenu {
             Button {
                 openWindow(id: "thread", value: thread.id)
@@ -306,7 +391,9 @@ private struct ThreadRow: View {
             Button(action: onSettle) {
                 Label(
                     thread.settledAt == nil ? "Mark Done" : "Mark Active",
-                    systemImage: thread.settledAt == nil ? "checkmark.circle" : "arrow.uturn.backward.circle"
+                    systemImage: thread.settledAt == nil
+                        ? "checkmark.circle"
+                        : "arrow.uturn.backward.circle"
                 )
             }
             Button(action: onRename) {
@@ -316,112 +403,11 @@ private struct ThreadRow: View {
             Button(role: thread.archivedAt == nil ? .destructive : nil, action: onArchive) {
                 Label(
                     thread.archivedAt == nil ? "Archive" : "Unarchive",
-                    systemImage: thread.archivedAt == nil ? "archivebox" : "arrow.uturn.backward"
+                    systemImage: thread.archivedAt == nil
+                        ? "archivebox"
+                        : "arrow.uturn.backward"
                 )
             }
         }
-    }
-}
-
-private struct ProjectDetailView: View {
-    @SwiftUI.Environment(AppModel.self) private var model
-    let projectID: String
-    @Binding var path: [VisionRoute]
-    @State private var showingNewTask = false
-
-    private var project: OrchestrationProject? {
-        model.snapshot?.projects.first { $0.id == projectID }
-    }
-
-    private var threads: [OrchestrationThreadShell] {
-        (model.snapshot?.threads ?? [])
-            .filter { $0.projectId == projectID && $0.archivedAt == nil }
-            .sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    var body: some View {
-        Group {
-            if let project {
-                List {
-                    Section("Workspace") {
-                        LabeledContent("Path", value: project.workspaceRoot)
-                        if let model = project.defaultModelSelection {
-                            LabeledContent("Default model", value: model.model)
-                        }
-                    }
-                    Section("Tasks") {
-                        if threads.isEmpty {
-                            Text("No active tasks")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(threads) { thread in
-                                NavigationLink(value: VisionRoute.thread(thread.id)) {
-                                    VStack(alignment: .leading) {
-                                        Text(thread.title)
-                                        if let branch = thread.branch {
-                                            Text(branch)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                .navigationTitle(project.title)
-                .toolbar {
-                    Button {
-                        showingNewTask = true
-                    } label: {
-                        Label("New Task", systemImage: "plus")
-                    }
-                }
-            } else {
-                ContentUnavailableView("Project unavailable", systemImage: "folder.badge.questionmark")
-            }
-        }
-        .sheet(isPresented: $showingNewTask) {
-            NewTaskView(projectID: projectID) { threadID in
-                path.append(.thread(threadID))
-            }
-            .environment(model)
-        }
-    }
-}
-
-private struct RenameTaskView: View {
-    @SwiftUI.Environment(\.dismiss) private var dismiss
-    let thread: OrchestrationThreadShell
-    let onRename: (String) -> Void
-    @State private var title: String
-
-    init(thread: OrchestrationThreadShell, onRename: @escaping (String) -> Void) {
-        self.thread = thread
-        self.onRename = onRename
-        _title = State(initialValue: thread.title)
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Task name", text: $title)
-            }
-            .navigationTitle("Rename Task")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        onRename(trimmed)
-                        dismiss()
-                    }
-                }
-            }
-        }
-        .frame(minWidth: 440, minHeight: 240)
     }
 }
