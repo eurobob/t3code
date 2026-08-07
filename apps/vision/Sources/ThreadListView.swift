@@ -26,9 +26,14 @@ struct ThreadListView: View {
                     )
                 } else {
                     List(threads) { thread in
-                        ThreadRow(thread: thread, project: projectsByID[thread.projectId])
+                        NavigationLink(value: thread.id) {
+                            ThreadRow(thread: thread, project: projectsByID[thread.projectId])
+                        }
                     }
                 }
+            }
+            .navigationDestination(for: String.self) { threadID in
+                ThreadDetailView(threadID: threadID)
             }
             .navigationTitle(model.environment?.label ?? "T3 Code")
             .toolbar {

@@ -11,6 +11,17 @@ import Observation
 @MainActor
 @Observable
 final class AppModel {
+    enum ClientError: LocalizedError {
+        case notConnected
+
+        var errorDescription: String? {
+            switch self {
+            case .notConnected:
+                "T3 Vision is not connected to an environment."
+            }
+        }
+    }
+
     enum Phase: Equatable {
         case signedOut
         case signingIn
@@ -208,6 +219,19 @@ final class AppModel {
         snapshot = nil
         environment = nil
         phase = account == nil ? .signedOut : .choosingEnvironment
+    }
+
+    func threadSnapshot(id: String) async throws -> OrchestrationThreadDetailSnapshot {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.threadSnapshot(id: id)
+    }
+
+    func threadEvents(
+        threadID: String,
+        after sequence: Int
+    ) async throws -> AsyncThrowingStream<ThreadStreamItem, Error> {
+        guard let client else { throw ClientError.notConnected }
+        return await client.threadEvents(threadID: threadID, after: sequence)
     }
 
     func signOut() async {
