@@ -90,12 +90,20 @@ with what was last viewed, and clears while that task is open. Sidebar rows use
 one custom selection background instead of stacking List selection and
 NavigationLink focus chrome. The microphone uses the native circular lift hover
 effect, and Send is a larger blue capsule.
+Consecutive tool activity is collated into a compact summary such as
+`Ran 5 commands · Changed 2 files`; expanding the batch restores the individual
+activity rows and their own projected detail. Messages, errors, and approvals
+break batches so important state remains prominent.
 Voice-dock height changes scroll the transcript bottom into view so dictation
 growth moves the latest bubbles above the controls; the scroll waits one layout
 yield so it uses the new viewport. Successful sends do not show a redundant
 confirmation. Stop is present only while the live thread reports a running turn,
 and it and dictation Cancel are solid red/white buttons. Activity rows with
 server-projected detail can expand to reveal it.
+Live transcript following now yields as soon as the user manually scrolls and
+resumes only when they return near the bottom or select the `Latest` control.
+Programmatic following no longer animates across long conversations, avoiding
+the apparent high-speed scroll caused by new events fighting manual movement.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
@@ -108,7 +116,7 @@ client because the server has no thread-order command.
 
 The implementation passed an Xcode 26 visionOS device build and was installed
 and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
-most recently at product commit `4653a5c1`.
+most recently at product commit `7b73d778`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window
 restoration.
