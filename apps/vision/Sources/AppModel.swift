@@ -457,8 +457,12 @@ final class AppModel {
         }
         let providers = serverConfig?.providers ?? []
         for provider in providers where provider.enabled && provider.installed {
-            if let model = provider.models.first(where: { $0.isDefault == true }) {
-                return ModelSelection(instanceId: provider.instanceId, model: model.slug)
+            if let model = provider.models.first(where: { $0.isDefault == true }),
+               let option = availableModels.first(where: {
+                   $0.selection.instanceId == provider.instanceId
+                       && $0.selection.model == model.slug
+               }) {
+                return option.selection
             }
         }
         return availableModels.first?.selection

@@ -169,7 +169,10 @@ struct ThreadListView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
             EditButton()
-                .disabled(filter == .archived)
+                .disabled(
+                    filter == .archived
+                        || !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
 
             Menu {
                 Picker("Show", selection: $filter) {
@@ -231,6 +234,7 @@ struct ThreadListView: View {
         from source: IndexSet,
         to destination: Int
     ) {
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         var ids = threads(for: projectID).map(\.id)
         ids.move(fromOffsets: source, toOffset: destination)
         model.setThreadOrder(ids)
