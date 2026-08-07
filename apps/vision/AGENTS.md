@@ -52,15 +52,6 @@ xcodebuild -project T3Vision.xcodeproj -scheme T3Vision -configuration Release \
   DEVELOPMENT_TEAM=SZP9K9CJAX -allowProvisioningUpdates build
 ```
 
-### Device deployment requires current consent
-
-Never install or launch T3 Vision on a paired device unless the user explicitly
-asks for deployment in the current task. A request from an earlier task or turn
-is not standing permission. In particular, do not invoke `mac-verify --deploy`,
-advance a deployment-wrapper repository, or otherwise mutate the headset merely
-as verification for a source change. Remote compile-only verification is
-separate from device deployment and must remain non-mutating.
-
 ## Current state
 
 Implemented: pairing to a server by URL with launch-time restoration, a compact
