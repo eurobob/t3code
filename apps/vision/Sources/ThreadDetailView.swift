@@ -3,18 +3,30 @@ import Observation
 import SwiftUI
 import UIKit
 
+struct VisionTaskBrief: Codable, Equatable {
+    let asked: [String]
+    let decisions: [String]
+    let done: [String]
+    let nextActions: [String]
+    let needsYou: [String]
+    let modelSelection: ModelSelection
+    let generatedAt: String
+}
+
 @MainActor
 @Observable
 final class ThreadDetailModel {
     private struct CachedTaskSummary: Codable {
         let sourceRevision: String
-        let summary: GeneratedTaskSummary
+        let summary: VisionTaskBrief
     }
 
     private struct ClaudeSummaryEnvelope: Decodable {
         struct Payload: Codable {
-            let asked: String
-            let done: String
+            let asked: [String]
+            let decisions: [String]
+            let done: [String]
+            let nextActions: [String]
             let needsYou: [String]
         }
 
@@ -183,7 +195,7 @@ final class ThreadDetailModel {
     private(set) var submissionRevision = 0
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
-    private(set) var generatedSummary: GeneratedTaskSummary?
+    private(set) var generatedSummary: VisionTaskBrief?
     private(set) var generatedSummaryRevision: String?
     private(set) var summaryIsLoading = false
     private(set) var summaryError: String?
@@ -315,7 +327,7 @@ final class ThreadDetailModel {
         return "settled:\(summarySourceRevision ?? "none")"
     }
 
-    var visibleGeneratedSummary: GeneratedTaskSummary? {
+    var visibleGeneratedSummary: VisionTaskBrief? {
         if isAgentWorking || summaryIsLoading {
             return generatedSummary
         }
@@ -394,13 +406,13 @@ final class ThreadDetailModel {
     /// changing behavior with the T3 server version or configured utility model.
     private func generateTaskSummaryWithClaude(
         using appModel: AppModel
-    ) async throws -> GeneratedTaskSummary {
+    ) async throws -> VisionTaskBrief {
         guard let thread,
               let project = appModel.snapshot?.projects.first(where: {
                   $0.id == thread.projectId
               }) else { throw SummaryFallbackError.threadUnavailable }
 
-        let schema = #"{"type":"object","properties":{"asked":{"type":"string"},"done":{"type":"string"},"needsYou":{"type":"array","items":{"type":"string"}}},"required":["asked","done","needsYou"],"additionalProperties":false}"#
+        let schema = #"{"type":"object","properties":{"asked":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":3},"decisions":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":4},"done":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":4},"nextActions":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3},"needsYou":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3}},"required":["asked","decisions","done","nextActions","needsYou"],"additionalProperties":false}"#
         var rejectedDraft: ClaudeSummaryEnvelope.Payload?
 
         for _ in 0..<2 {
@@ -455,11 +467,19 @@ final class ThreadDetailModel {
 
     private func validatedTaskSummary(
         _ payload: ClaudeSummaryEnvelope.Payload
-    ) -> GeneratedTaskSummary? {
-        let asked = payload.asked.trimmingCharacters(in: .whitespacesAndNewlines)
-        let done = payload.done.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedAsked = normalizedSummaryField(asked)
-        let normalizedDone = normalizedSummaryField(done)
+    ) -> VisionTaskBrief? {
+        let asked = normalizedSummaryItems(payload.asked, limit: 3)
+        let decisions = normalizedSummaryItems(payload.decisions, limit: 4)
+        let done = normalizedSummaryItems(payload.done, limit: 4)
+        let nextActions = normalizedSummaryItems(payload.nextActions, limit: 3)
+        let needsYou = normalizedSummaryItems(payload.needsYou, limit: 3)
+        let normalizedAsked = asked.map(normalizedSummaryField)
+        let normalizedDecisions = decisions.map(normalizedSummaryField)
+        let normalizedDone = done.map(normalizedSummaryField)
+        let normalizedNextActions = nextActions.map(normalizedSummaryField)
+        let normalizedNeedsYou = needsYou.map(normalizedSummaryField)
+        let allCategorizedItems = normalizedAsked + normalizedDecisions + normalizedDone
+            + normalizedNextActions + normalizedNeedsYou
         let placeholders: Set<String> = ["test", "testing", "none", "unknown", "n a", "na", "todo", "tbd"]
         let processNarration = [
             "agent is working on this now",
@@ -467,24 +487,39 @@ final class ThreadDetailModel {
             "currently working on this",
         ]
 
-        guard !normalizedAsked.isEmpty,
-              !normalizedDone.isEmpty,
-              normalizedAsked != normalizedDone,
-              !placeholders.contains(normalizedAsked),
-              !placeholders.contains(normalizedDone),
-              !processNarration.contains(where: { normalizedDone.contains($0) }) else { return nil }
+        guard !asked.isEmpty,
+              !done.isEmpty,
+              asked.allSatisfy({ $0.count <= 120 }),
+              decisions.allSatisfy({ $0.count <= 120 }),
+              done.allSatisfy({ $0.count <= 120 }),
+              nextActions.allSatisfy({ $0.count <= 120 }),
+              needsYou.allSatisfy({ $0.count <= 120 }),
+              allCategorizedItems.allSatisfy({ !placeholders.contains($0) }),
+              Set(allCategorizedItems).count == allCategorizedItems.count,
+              Set(normalizedAsked).isDisjoint(with: Set(normalizedDone)),
+              !processNarration.contains(where: { phrase in
+                  normalizedDone.contains(where: { $0.contains(phrase) })
+              }) else { return nil }
 
-        let needsYou = payload.needsYou
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .prefix(5)
-        return GeneratedTaskSummary(
+        return VisionTaskBrief(
             asked: asked,
+            decisions: decisions,
             done: done,
-            needsYou: Array(needsYou),
+            nextActions: nextActions,
+            needsYou: needsYou,
             modelSelection: ModelSelection(instanceId: "claude", model: "sonnet"),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    private func normalizedSummaryItems(_ items: [String], limit: Int) -> [String] {
+        items.prefix(limit).compactMap { item in
+            let normalized = item
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: #"^[•\-*]\s*"#, with: "", options: .regularExpression)
+            return normalized.isEmpty ? nil : normalized
+        }
     }
 
     private func normalizedSummaryField(_ value: String) -> String {
@@ -606,21 +641,32 @@ final class ThreadDetailModel {
         var sections = [
             "Project: \(projectTitle)",
             "Task: \(thread.title)",
-            "Return a concise task brief grounded only in the supplied history. "
-                + "'asked' must state the user's current goal, including important constraints. "
-                + "'done' must name concrete outcomes already completed and must not use process "
-                + "narration such as 'the agent is working on this now'. If nothing is complete, "
-                + "say so plainly and identify the current state. 'needsYou' must contain only "
-                + "specific decisions or actions the user must take; return an empty array when "
-                + "none are required. A vague or test-only request is not completed work: explain "
-                + "that no actionable task was specified and that no substantive work was done. "
-                + "Do not invent implementation results.",
+            "Write a glanceable task brief grounded only in the supplied history. Return arrays "
+                + "of short scan lines, not paragraphs. Use plain language and front-load the "
+                + "important noun or outcome. Each line must express one idea in at most 120 "
+                + "characters. Sentence fragments are fine. No headings or bullet characters; "
+                    + "the interface adds them. 'asked': 1-3 lines stating the user's current desired "
+                    + "end state and key constraints, incorporating later corrections. 'decisions': "
+                    + "up to 4 durable choices or constraints agreed in the task; do not repeat the "
+                    + "request. 'done': 1-4 "
+                + "lines naming only concrete outcomes already completed or verified. Omit the "
+                + "implementation diary, chronology, file-by-file details, and process narration. "
+                + "Treat the latest user correction as authoritative: if it reports that an "
+                + "earlier fix still fails, do not describe that fix as successful. Do not treat "
+                + "commit titles or an agent's claim of completion as verification. "
+                    + "'nextActions': up to 3 concrete remaining steps the agent can take. "
+                    + "'needsYou': at most 3 "
+                    + "specific decisions or actions actually required from the user; use an empty "
+                    + "array when none are required. For a vague or test-only request, say briefly "
+                    + "that no actionable task was specified and no substantive work was done. Never "
+                    + "repeat the same fact across categories. Never invent results.",
         ]
         if let rejectedDraft {
             sections.append(
                 "A previous draft was rejected as placeholder or duplicated content. Replace it "
-                    + "with a specific grounded brief. Rejected asked: \(rejectedDraft.asked)\n"
-                    + "Rejected done: \(rejectedDraft.done)"
+                    + "with terse, distinct scan lines. Rejected asked: "
+                    + "\(rejectedDraft.asked.joined(separator: " | "))\nRejected done: "
+                    + rejectedDraft.done.joined(separator: " | ")
             )
         }
         let messages = thread.messages.suffix(40).map {
@@ -643,7 +689,7 @@ final class ThreadDetailModel {
     }
 
     private func taskSummaryCacheKey(environmentID: String?) -> String {
-        "codes.t3.vision.task-summary.v2.\(environmentID ?? "unknown").\(threadID)"
+        "codes.t3.vision.task-summary.v4.\(environmentID ?? "unknown").\(threadID)"
     }
 
     func submit(using appModel: AppModel) {
@@ -1545,7 +1591,7 @@ struct ThreadDetailView: View {
                 TaskBriefCard(
                     title: "What you asked",
                     icon: "text.bubble",
-                    text: model.visibleGeneratedSummary?.asked ?? originalRequest,
+                    items: model.visibleGeneratedSummary?.asked ?? originalRequest.map { [$0] },
                     emptyText: model.summaryIsLoading
                         ? "Generating an AI brief…"
                         : "The task request has not arrived yet.",
@@ -1553,10 +1599,22 @@ struct ThreadDetailView: View {
                     files: []
                 )
 
+                if let decisions = model.visibleGeneratedSummary?.decisions,
+                   !decisions.isEmpty {
+                    TaskBriefCard(
+                        title: "Key decisions",
+                        icon: "signpost.right.and.left",
+                        items: decisions,
+                        emptyText: "",
+                        isWorking: false,
+                        files: []
+                    )
+                }
+
                 TaskBriefCard(
                     title: "What was done",
                     icon: "checkmark.circle",
-                    text: model.visibleGeneratedSummary?.done ?? latestResult,
+                    items: model.visibleGeneratedSummary?.done ?? latestResult.map { [$0] },
                     emptyText: model.summaryIsLoading
                         ? "Reading the task history…"
                         : (model.isAgentWorking
@@ -1565,6 +1623,18 @@ struct ThreadDetailView: View {
                     isWorking: model.isAgentWorking,
                     files: latestCheckpointFiles
                 )
+
+                if let nextActions = model.visibleGeneratedSummary?.nextActions,
+                   !nextActions.isEmpty {
+                    TaskBriefCard(
+                        title: "Next actions",
+                        icon: "arrow.right.circle",
+                        items: nextActions,
+                        emptyText: "",
+                        isWorking: false,
+                        files: []
+                    )
+                }
 
                 if pendingAttention.isEmpty && generatedActions.isEmpty {
                     Label(
@@ -2442,7 +2512,7 @@ private struct ActivityRow: View {
 private struct TaskBriefCard: View {
     let title: String
     let icon: String
-    let text: String?
+    let items: [String]?
     let emptyText: String
     let isWorking: Bool
     let files: [CheckpointFile]
@@ -2463,9 +2533,24 @@ private struct TaskBriefCard: View {
                 }
             }
 
-            Text(text ?? emptyText)
-                .foregroundStyle(text == nil ? .secondary : .primary)
-                .textSelection(.enabled)
+            if let items, !items.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .top, spacing: 9) {
+                            Circle()
+                                .fill(Color.secondary)
+                                .frame(width: 5, height: 5)
+                                .padding(.top, 7)
+                            Text(item)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            } else {
+                Text(emptyText)
+                    .foregroundStyle(.secondary)
+            }
 
             if !files.isEmpty {
                 Divider()
