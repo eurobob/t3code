@@ -173,6 +173,10 @@ final class VisionWhisperKitService {
         }
     }
 
+    var diagnosticsAvailable: Bool {
+        state == .ready || state.isFailure
+    }
+
     func prepareIfNeeded() async {
         if largeKit != nil { return }
         if let preparationTask {
@@ -214,8 +218,12 @@ final class VisionWhisperKitService {
         if baseKit == nil {
             do {
                 baseKit = try await loadModel(.base)
+                Self.recordDiagnostic("WhisperKit Base ready")
                 Self.logger.notice("WhisperKit Base is ready")
             } catch {
+                Self.recordDiagnostic(
+                    "WhisperKit Base failed: \(error.localizedDescription)"
+                )
                 Self.logger.error(
                     "WhisperKit Base failed: \(error.localizedDescription, privacy: .public)"
                 )
@@ -229,11 +237,15 @@ final class VisionWhisperKitService {
         do {
             largeKit = try await loadModel(.large)
             state = .ready
+            Self.recordDiagnostic("WhisperKit Large v3 ready; preparation complete")
             Self.logger.notice("WhisperKit Large v3 is ready")
         } catch {
             state = .failed(
                 VisionWhisperKitModelSpec.large.displayName,
                 error.localizedDescription
+            )
+            Self.recordDiagnostic(
+                "WhisperKit Large v3 failed: \(error.localizedDescription)"
             )
             Self.logger.error(
                 "WhisperKit Large v3 failed: \(error.localizedDescription, privacy: .public)"
@@ -244,15 +256,18 @@ final class VisionWhisperKitService {
     private func loadModel(_ spec: VisionWhisperKitModelSpec) async throws -> WhisperKit {
         let preparationStartedAt = Date()
         state = .checkingCache(spec.displayName)
+        Self.recordDiagnostic("\(spec.displayName): checking cache")
         Self.logger.notice("[model] \(spec.displayName, privacy: .public) cache check started")
 
         let modelFolder: URL
         if let cachedModelFolder = Self.cachedModelFolder(spec) {
             modelFolder = cachedModelFolder
+            Self.recordDiagnostic("\(spec.displayName): cache hit")
             Self.logger.notice(
                 "[model] \(spec.displayName, privacy: .public) cache hit at \(cachedModelFolder.path, privacy: .private(mask: .hash))"
             )
         } else {
+            Self.recordDiagnostic("\(spec.displayName): cache miss; download started")
             Self.logger.notice("[model] \(spec.displayName, privacy: .public) cache miss; download started")
             let progressReporter = VisionWhisperKitProgressReporter()
             let downloadStartedAt = Date()
@@ -271,10 +286,14 @@ final class VisionWhisperKitService {
             Self.logger.notice(
                 "[model] \(spec.displayName, privacy: .public) download finished in \(Date().timeIntervalSince(downloadStartedAt), format: .fixed(precision: 2))s"
             )
+            Self.recordDiagnostic(
+                "\(spec.displayName): download finished in \(Self.secondsSince(downloadStartedAt))s"
+            )
         }
 
         state = .loading(spec.displayName)
         let loadStartedAt = Date()
+        Self.recordDiagnostic("\(spec.displayName): Core ML load started")
         Self.logger.notice("[model] \(spec.displayName, privacy: .public) Core ML load started")
         let slowLoadingTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(15))
@@ -292,10 +311,21 @@ final class VisionWhisperKitService {
             download: false
         ))
         try await whisperKit.loadModels()
+        Self.recordDiagnostic(
+            "\(spec.displayName): Core ML load finished in \(Self.secondsSince(loadStartedAt))s; total \(Self.secondsSince(preparationStartedAt))s"
+        )
         Self.logger.notice(
             "[model] \(spec.displayName, privacy: .public) Core ML load finished in \(Date().timeIntervalSince(loadStartedAt), format: .fixed(precision: 2))s; total \(Date().timeIntervalSince(preparationStartedAt), format: .fixed(precision: 2))s"
         )
         return whisperKit
+    }
+
+    private static func recordDiagnostic(_ message: String) {
+        VisionDictationDiagnostics.shared.record(message)
+    }
+
+    private static func secondsSince(_ date: Date) -> String {
+        String(format: "%.2f", Date().timeIntervalSince(date))
     }
 
     private static func cachedModelFolder(_ spec: VisionWhisperKitModelSpec) -> URL? {
@@ -363,6 +393,9 @@ final class VisionDictationController {
         lastSystemPreview = ""
         utteranceID = String(UUID().uuidString.prefix(8))
         utteranceStartedAt = Date()
+        Self.recordDiagnostic(
+            "Utterance \(utteranceID): started with System dictation; best available final engine is \(VisionWhisperKitService.shared.activeEngineName)"
+        )
         Self.logger.notice(
             "[utterance \(self.utteranceID, privacy: .public)] starting with System dictation; Whisper availability: \(VisionWhisperKitService.shared.activeEngineName, privacy: .public)"
         )
@@ -386,6 +419,9 @@ final class VisionDictationController {
         let samples = systemController.snapshotSamples()
 
         let fallbackText = combinedSystemText
+        Self.recordDiagnostic(
+            "Utterance \(utteranceID): capture stopped after \(Self.secondsSince(utteranceStartedAt))s with \(samples.count) samples and \(fallbackText.count) System characters"
+        )
         Self.logger.notice(
             "[utterance \(self.utteranceID, privacy: .public)] capture stopped after \(Date().timeIntervalSince(self.utteranceStartedAt), format: .fixed(precision: 2))s with \(samples.count, privacy: .public) samples and \(fallbackText.count, privacy: .public) System characters"
         )
@@ -399,6 +435,9 @@ final class VisionDictationController {
                 let decision = Self.whisperDecision(
                     candidate: text,
                     fallback: fallbackText
+                )
+                Self.recordDiagnostic(
+                    "Utterance \(utteranceID): \(session.engineName) final pass took \(Self.secondsSince(transcriptionStartedAt))s and produced \(text.count) characters; \(decision.reason)"
                 )
                 Self.logger.notice(
                     "[utterance \(self.utteranceID, privacy: .public)] final \(session.engineName, privacy: .public) pass finished in \(Date().timeIntervalSince(transcriptionStartedAt), format: .fixed(precision: 2))s with \(text.count, privacy: .public) characters; \(decision.reason, privacy: .public)"
@@ -415,6 +454,9 @@ final class VisionDictationController {
             }
         }
         if !fallbackText.isEmpty {
+            Self.recordDiagnostic(
+                "Utterance \(utteranceID): selected System dictation fallback"
+            )
             Self.logger.notice("[utterance \(self.utteranceID, privacy: .public)] selected System dictation fallback")
             onFinalized?(fallbackText)
         } else {
@@ -512,5 +554,13 @@ final class VisionDictationController {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
+    }
+
+    private static func recordDiagnostic(_ message: String) {
+        VisionDictationDiagnostics.shared.record(message)
+    }
+
+    private static func secondsSince(_ date: Date) -> String {
+        String(format: "%.2f", Date().timeIntervalSince(date))
     }
 }

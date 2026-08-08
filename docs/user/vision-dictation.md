@@ -23,3 +23,9 @@ The first WhisperKit upgrade downloads roughly 147 MB; the later Large v3
 upgrade is roughly 626 MB. Later launches reuse both device caches, although the
 app still loads each model into memory after launch. Prepared models remain
 loaded for subsequent dictation during that app session.
+
+When model preparation completes or fails, the voice dock offers **Copy
+diagnostics**. It copies a bounded on-device history of cache checks, downloads,
+Core ML load timings, and transcription-engine decisions that can be pasted into
+a support conversation. Recognized speech and model paths are deliberately
+excluded.

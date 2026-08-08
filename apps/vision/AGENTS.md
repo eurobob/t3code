@@ -275,6 +275,12 @@ product vocabulary only. Project and branch vocabulary belongs in
 SpeechAnalyzer's context because feeding it to the Whisper decoder can cause
 branch-name hallucinations.
 
+Dictation diagnostics are also kept in a bounded, privacy-safe in-memory log.
+Once model preparation completes or fails, the voice dock exposes a Copy
+diagnostics action so device owners can share cache, Core ML timing, and engine
+selection evidence without coordinating a remote live capture. Never include
+recognized speech or model paths in that copied log.
+
 Cancel rolls back only if the draft still ends with exactly what dictation
 appended, so a mid-dictation edit is never eaten. The composer continues to
 accept contextual vocabulary even though the current WhisperKit decoder does

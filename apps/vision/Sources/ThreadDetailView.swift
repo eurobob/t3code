@@ -1384,6 +1384,7 @@ struct ThreadDetailView: View {
     @State private var followsTranscriptBottom = true
     @State private var transcriptIsAtBottom = true
     @State private var showsDeployError = false
+    @State private var diagnosticsCopied = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -1844,6 +1845,27 @@ struct ThreadDetailView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if dictationService.diagnosticsAvailable {
+                HStack(spacing: 8) {
+                    Label(
+                        dictationService.state == .ready
+                            ? "WhisperKit models ready"
+                            : "Dictation diagnostics ready",
+                        systemImage: "doc.text.magnifyingglass"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button(diagnosticsCopied ? "Copied" : "Copy diagnostics") {
+                        UIPasteboard.general.string =
+                            VisionDictationDiagnostics.shared.copyableText
+                        diagnosticsCopied = true
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+                }
             }
 
             if model.isDictating, !voicePreview.isEmpty {
