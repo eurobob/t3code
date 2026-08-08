@@ -92,8 +92,10 @@ client-side steering, tap-to-record dictation, project and task creation, task
 organization, and one data-driven spatial window per thread.
 
 The task sidebar is flat by default, can optionally group by project, and keeps
-project names subordinate as row pretitles or inert section headers. New-task
-creation stays in the detail pane and carries an exact project preselection.
+project names subordinate as row pretitles or inert section headers. Completed
+tasks always move into a dedicated section at the bottom, including when the
+remaining tasks are grouped by project. New-task creation stays in the detail
+pane and carries an exact project preselection.
 Provider-advertised model options such as reasoning effort are sent through the
 real `ModelSelection` option surface. The task composer is a layout-reserved
 system-material voice dock: dictation is primary, manual text is opt-in, and it
