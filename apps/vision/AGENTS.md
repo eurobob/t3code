@@ -290,6 +290,12 @@ On visionOS dictation is tap once to start and tap again to stop; do not make th
 user hold a pinch for the whole utterance. The voice dock must occupy reserved
 layout space so transcript content never competes with it.
 
+Sending during dictation is intentionally latency-first: snapshot the visible
+system transcript, enter the existing optimistic send flow immediately, and
+stop capture in the background. A dispatch failure restores the combined draft.
+Stopping with the microphone is the quality-first path that waits for the
+guarded WhisperKit final pass.
+
 ## Conventions
 
 Conventional commit titles. Match surrounding code style. Check signatures in

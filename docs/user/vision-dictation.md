@@ -19,6 +19,12 @@ available WhisperKit tier makes a final pass. T3 uses that result only when it
 plausibly agrees with the streaming transcript; otherwise it keeps the system
 result instead of replacing valid speech with a hallucination.
 
+Select the microphone again when you want WhisperKit to refine the transcript
+before editing it. Select Send while recording for the latency-first path: T3
+immediately sends the system transcript already on screen and stops recording
+in the background. A dispatch failure restores that exact combined draft so it
+can be retried or edited.
+
 The first WhisperKit upgrade downloads roughly 147 MB; the later Large v3
 upgrade is roughly 626 MB. Later launches reuse both device caches, although the
 app still loads each model into memory after launch. Prepared models remain

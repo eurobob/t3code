@@ -810,7 +810,34 @@ final class ThreadDetailModel {
     }
 
     func finishDictationAndSubmit(using appModel: AppModel) {
-        finishDictation(submitUsing: appModel)
+        let liveText = volatileDictation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard dictationActive, !liveText.isEmpty else {
+            finishDictation(submitUsing: appModel)
+            return
+        }
+
+        // Send is the latency-first path: use the transcript already visible to
+        // the user and enter the normal optimistic send flow immediately. The
+        // microphone Stop button remains the quality-first Whisper refinement.
+        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
+        draft += separator + liveText
+        dictationActive = false
+        volatileDictation = ""
+        committedDictation = ""
+        dictationPhase = .idle
+        submitAfterDictationAppModel = nil
+        VisionDictationDiagnostics.shared.record(
+            "Send used the visible System transcript immediately; capture is stopping in the background"
+        )
+
+        let preparationTask = dictationTask
+        dictationTask?.cancel()
+        dictationTask = Task { [weak self] in
+            await preparationTask?.value
+            await self?.dictationController.cancel()
+            self?.dictationTask = nil
+        }
+        submit(using: appModel)
     }
 
     private func finishDictation(submitUsing appModel: AppModel?) {
