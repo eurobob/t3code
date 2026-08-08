@@ -6,6 +6,11 @@ import UIKit
 @MainActor
 @Observable
 final class ThreadDetailModel {
+    private struct CachedTaskSummary: Codable {
+        let sourceRevision: String
+        let summary: GeneratedTaskSummary
+    }
+
     enum LoadState: Equatable {
         case loading
         case loaded
@@ -131,6 +136,10 @@ final class ThreadDetailModel {
     private(set) var submissionRevision = 0
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
+    private(set) var generatedSummary: GeneratedTaskSummary?
+    private(set) var generatedSummaryRevision: String?
+    private(set) var summaryIsLoading = false
+    private(set) var summaryError: String?
     var draft = ""
     var attachments: [VisionDraftAttachment] = []
 
@@ -229,6 +238,38 @@ final class ThreadDetailModel {
         return "\(message):\(activity):\(isAgentWorking):\(submissionRevision)"
     }
 
+    var summarySourceRevision: String? {
+        guard let thread,
+              thread.messages.contains(where: {
+                  $0.role == "user"
+                      && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              }) else { return nil }
+        let latestMessage = thread.messages.last.map {
+            "\($0.id):\($0.updatedAt):\($0.text.count):\($0.streaming)"
+        } ?? "none"
+        let latestCheckpoint = thread.checkpoints.last.map {
+            "\($0.turnId):\($0.completedAt):\($0.files.count)"
+        } ?? "none"
+        let latestActivity = thread.activities.last.map {
+            "\($0.id):\($0.createdAt):\($0.kind)"
+        } ?? "none"
+        return [
+            thread.updatedAt,
+            latestMessage,
+            latestActivity,
+            latestCheckpoint,
+            thread.latestTurn?.state ?? "none",
+        ].joined(separator: ":")
+    }
+
+    var visibleGeneratedSummary: GeneratedTaskSummary? {
+        if isAgentWorking || summaryIsLoading {
+            return generatedSummary
+        }
+        guard generatedSummaryRevision == summarySourceRevision else { return nil }
+        return generatedSummary
+    }
+
     func start(using appModel: AppModel) async {
         guard eventsTask == nil else { return }
         loadState = .loading
@@ -254,6 +295,50 @@ final class ThreadDetailModel {
         scriptTask?.cancel()
         scriptTask = nil
         cancelDictation()
+    }
+
+    func ensureTaskSummary(using appModel: AppModel, force: Bool = false) async {
+        guard !summaryIsLoading,
+              !isAgentWorking,
+              let sourceRevision = summarySourceRevision else { return }
+        let cacheKey = taskSummaryCacheKey(environmentID: appModel.environment?.id)
+
+        if !force, generatedSummaryRevision == sourceRevision, generatedSummary != nil {
+            return
+        }
+        if !force,
+           let data = UserDefaults.standard.data(forKey: cacheKey),
+           let cached = try? JSONDecoder().decode(CachedTaskSummary.self, from: data),
+           cached.sourceRevision == sourceRevision {
+            generatedSummary = cached.summary
+            generatedSummaryRevision = cached.sourceRevision
+            summaryError = nil
+            return
+        }
+
+        summaryIsLoading = true
+        defer { summaryIsLoading = false }
+        summaryError = nil
+        do {
+            let summary = try await appModel.generateTaskSummary(threadID: threadID)
+            try Task.checkCancellation()
+            guard summarySourceRevision == sourceRevision else { return }
+            generatedSummary = summary
+            generatedSummaryRevision = sourceRevision
+            if let data = try? JSONEncoder().encode(
+                CachedTaskSummary(sourceRevision: sourceRevision, summary: summary)
+            ) {
+                UserDefaults.standard.set(data, forKey: cacheKey)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            summaryError = error.localizedDescription
+        }
+    }
+
+    private func taskSummaryCacheKey(environmentID: String?) -> String {
+        "codes.t3.vision.task-summary.\(environmentID ?? "unknown").\(threadID)"
     }
 
     func submit(using appModel: AppModel) {
@@ -896,6 +981,41 @@ private enum TranscriptEntry: Identifiable {
     }
 }
 
+private struct TaskAttentionItem: Identifiable {
+    enum Kind {
+        case approval
+        case input
+        case plan
+        case error
+    }
+
+    let id: String
+    let kind: Kind
+    let title: String
+    let detail: String
+    let createdAt: String
+}
+
+private func userInputSummary(_ payload: JSONValue) -> String? {
+    guard case let .array(questions)? = payload["questions"] else { return nil }
+    let summaries = questions.compactMap { value -> String? in
+        guard case let .object(question) = value,
+              let text = question["question"]?.stringValue else { return nil }
+        guard case let .array(options)? = question["options"] else { return text }
+        let choices = options.compactMap { option -> String? in
+            guard case let .object(fields) = option,
+                  let label = fields["label"]?.stringValue else { return nil }
+            guard let description = fields["description"]?.stringValue,
+                  !description.isEmpty else { return label }
+            return "\(label) — \(description)"
+        }
+        guard !choices.isEmpty else { return text }
+        return "\(text)\nOptions: \(choices.joined(separator: "; "))"
+    }
+    guard !summaries.isEmpty else { return nil }
+    return summaries.joined(separator: "\n\n")
+}
+
 private struct VoiceDockHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -912,7 +1032,9 @@ struct ThreadDetailView: View {
     }
 
     @SwiftUI.Environment(AppModel.self) private var appModel
+    private let conversationPanelDefaultsKey: String
     @State private var model: ThreadDetailModel
+    @State private var showsConversationPanel: Bool
     @State private var draftEditorMode = DraftEditorMode.hidden
     @State private var prefersHardwareEditor = false
     @State private var dictationBaseline = ""
@@ -923,7 +1045,14 @@ struct ThreadDetailView: View {
     @State private var showsDeployError = false
 
     init(threadID: String) {
+        let conversationPanelDefaultsKey = "codes.t3.vision.conversation-panel.\(threadID)"
+        let legacyDetailModeKey = "codes.t3.vision.task-detail-mode.\(threadID)"
+        self.conversationPanelDefaultsKey = conversationPanelDefaultsKey
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
+        _showsConversationPanel = State(
+            initialValue: UserDefaults.standard.object(forKey: conversationPanelDefaultsKey) as? Bool
+                ?? (UserDefaults.standard.string(forKey: legacyDetailModeKey) == "chat")
+        )
     }
 
     var body: some View {
@@ -938,7 +1067,7 @@ struct ThreadDetailView: View {
                     Text(message)
                 }
             case .loaded:
-                transcript
+                taskDetail
             }
         }
         .navigationTitle("")
@@ -955,97 +1084,296 @@ struct ThreadDetailView: View {
         .onChange(of: model.draftRestorationRevision) {
             draftEditorMode = prefersHardwareEditor ? .hardwareKeyboard : .softwareKeyboard
         }
+        .onChange(of: showsConversationPanel) {
+            UserDefaults.standard.set(showsConversationPanel, forKey: conversationPanelDefaultsKey)
+        }
         .onDisappear { model.stop() }
     }
 
-    private var transcript: some View {
+    private var taskDetail: some View {
         VStack(spacing: 0) {
             threadStateBar
             Divider()
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 14) {
-                        if let error = model.liveError {
-                            Label(error, systemImage: "wifi.exclamationmark")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 20)
-                        }
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    taskSummary
 
-                        ForEach(transcriptEntries) { entry in
-                            switch entry {
-                            case let .message(message):
-                                MessageBubble(message: message)
-                            case let .activity(activity):
-                                ActivityRow(activity: activity)
-                            case let .activityBatch(activities):
-                                ActivityBatchRow(activities: activities)
+                    if !showsConversationPanel {
+                        Divider()
+                        voiceDock
+                    }
+                }
+                .frame(minWidth: 480, idealWidth: 680, maxWidth: .infinity)
+
+                if showsConversationPanel {
+                    Divider()
+                    VStack(spacing: 0) {
+                        conversationPanelHeader
+                        Divider()
+                        chatTranscript
+                        Divider()
+                        voiceDock
+                    }
+                    .frame(minWidth: 420, idealWidth: 520, maxWidth: 620)
+                }
+            }
+        }
+    }
+
+    private var conversationPanelHeader: some View {
+        HStack(spacing: 10) {
+            Label("Conversation", systemImage: "bubble.left.and.bubble.right")
+                .font(.headline)
+            Spacer()
+            Button {
+                showsConversationPanel = false
+            } label: {
+                Label("Close conversation", systemImage: "xmark")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityHint("Returns to the focused task summary")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var chatTranscript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 14) {
+                    if let error = model.liveError {
+                        Label(error, systemImage: "wifi.exclamationmark")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 20)
+                    }
+
+                    ForEach(transcriptEntries) { entry in
+                        switch entry {
+                        case let .message(message):
+                            MessageBubble(message: message)
+                        case let .activity(activity):
+                            ActivityRow(activity: activity)
+                        case let .activityBatch(activities):
+                            ActivityBatchRow(activities: activities)
+                        }
+                    }
+
+                    if model.isAgentWorking {
+                        AgentWorkingRow(label: model.workingLabel)
+                            .id("\(model.threadID)-working")
+                    }
+
+                    Color.clear
+                        .frame(height: 12)
+                        .id(transcriptBottomID)
+                }
+                .padding(20)
+            }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.visibleRect.maxY >= geometry.contentSize.height - 8
+            } action: { _, isAtBottom in
+                transcriptIsAtBottom = isAtBottom
+                if isAtBottom {
+                    followsTranscriptBottom = true
+                }
+            }
+            .onScrollPhaseChange { _, phase in
+                switch phase {
+                case .interacting:
+                    followsTranscriptBottom = false
+                case .idle where transcriptIsAtBottom:
+                    followsTranscriptBottom = true
+                default:
+                    break
+                }
+            }
+            .onChange(of: model.transcriptRevision) {
+                guard followsTranscriptBottom else { return }
+                proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+            }
+            .task(id: voiceDockHeight) {
+                guard voiceDockHeight > 0, followsTranscriptBottom else { return }
+                await Task.yield()
+                proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+            }
+            .task(id: model.thread?.id) {
+                await Task.yield()
+                followsTranscriptBottom = true
+                proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+            }
+            .overlay(alignment: .bottom) {
+                if !followsTranscriptBottom, !transcriptIsAtBottom {
+                    Button {
+                        followsTranscriptBottom = true
+                        proxy.scrollTo(transcriptBottomID, anchor: .bottom)
+                    } label: {
+                        Label("Latest", systemImage: "arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .tint(.blue)
+                    .padding(16)
+                }
+            }
+        }
+    }
+
+    private var taskSummary: some View {
+        let pendingAttention = attentionItems
+        let generatedActions = pendingAttention.isEmpty
+            && !model.isAgentWorking
+            && model.generatedSummaryRevision == model.summarySourceRevision
+            ? model.visibleGeneratedSummary?.needsYou ?? []
+            : []
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                if let error = model.liveError {
+                    Label(error, systemImage: "wifi.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                taskSummaryGenerationStatus
+
+                if !pendingAttention.isEmpty || !generatedActions.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Needs you", systemImage: "exclamationmark.bubble.fill")
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+
+                        ForEach(pendingAttention) { item in
+                            TaskAttentionCard(item: item) {
+                                showsConversationPanel = true
                             }
                         }
 
-                        if model.isAgentWorking {
-                            AgentWorkingRow(label: model.workingLabel)
-                                .id("\(model.threadID)-working")
+                        ForEach(Array(generatedActions.enumerated()), id: \.offset) { _, action in
+                            TaskSummaryActionCard(action: action)
                         }
+                    }
+                }
 
-                        Color.clear
-                            .frame(height: 12)
-                            .id(transcriptBottomID)
-                    }
-                    .padding(20)
+                TaskBriefCard(
+                    title: "What you asked",
+                    icon: "text.bubble",
+                    text: model.visibleGeneratedSummary?.asked
+                        ?? (model.summaryError == nil ? nil : originalRequest),
+                    emptyText: model.summaryIsLoading
+                        ? "Generating an AI brief…"
+                        : "The task request has not arrived yet.",
+                    isWorking: false,
+                    files: []
+                )
+
+                TaskBriefCard(
+                    title: "What was done",
+                    icon: "checkmark.circle",
+                    text: model.visibleGeneratedSummary?.done
+                        ?? (model.summaryError == nil ? nil : latestResult),
+                    emptyText: model.summaryIsLoading
+                        ? "Reading the task history…"
+                        : (model.isAgentWorking
+                            ? "The agent is working on this now."
+                            : "The agent has not returned a result yet."),
+                    isWorking: model.isAgentWorking,
+                    files: latestCheckpointFiles
+                )
+
+                if pendingAttention.isEmpty && generatedActions.isEmpty {
+                    Label(
+                        model.isAgentWorking
+                            ? "Nothing needs your input while the agent works."
+                            : "No decision or action is waiting on you.",
+                        systemImage: "checkmark.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
                 }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.visibleRect.maxY >= geometry.contentSize.height - 8
-                } action: { _, isAtBottom in
-                    transcriptIsAtBottom = isAtBottom
-                    if isAtBottom {
-                        followsTranscriptBottom = true
-                    }
-                }
-                .onScrollPhaseChange { _, phase in
-                    switch phase {
-                    case .interacting:
-                        followsTranscriptBottom = false
-                    case .idle where transcriptIsAtBottom:
-                        followsTranscriptBottom = true
-                    default:
-                        break
-                    }
-                }
-                .onChange(of: model.transcriptRevision) {
-                    guard followsTranscriptBottom else { return }
-                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
-                }
-                .task(id: voiceDockHeight) {
-                    guard voiceDockHeight > 0, followsTranscriptBottom else { return }
-                    await Task.yield()
-                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
-                }
-                .task(id: model.thread?.id) {
-                    await Task.yield()
-                    followsTranscriptBottom = true
-                    proxy.scrollTo(transcriptBottomID, anchor: .bottom)
-                }
-                .overlay(alignment: .bottom) {
-                    if !followsTranscriptBottom, !transcriptIsAtBottom {
-                        Button {
-                            followsTranscriptBottom = true
-                            proxy.scrollTo(transcriptBottomID, anchor: .bottom)
-                        } label: {
-                            Label("Latest", systemImage: "arrow.down")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        .tint(.blue)
-                        .padding(16)
-                    }
+            }
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+            .padding(20)
+        }
+        .task(id: "\(model.summarySourceRevision ?? "none"):\(model.isAgentWorking)") {
+            await model.ensureTaskSummary(using: appModel)
+        }
+    }
+
+    @ViewBuilder
+    private var taskSummaryGenerationStatus: some View {
+        HStack(spacing: 10) {
+            if model.summaryIsLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(.tint)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(
+                    model.visibleGeneratedSummary == nil
+                        ? "AI task brief"
+                        : "AI-generated task brief"
+                )
+                    .font(.caption.weight(.semibold))
+                if let summary = model.visibleGeneratedSummary {
+                    Text("\(summary.modelSelection.instanceId) · \(summary.modelSelection.model)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else if model.summaryIsLoading {
+                    Text("Using the text-generation model configured on the server")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Divider()
-            voiceDock
+            Spacer()
+
+            if !showsConversationPanel {
+                Button {
+                    showsConversationPanel = true
+                } label: {
+                    Label("Open conversation", systemImage: "rectangle.righthalf.inset.filled")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("Opens the full conversation beside this summary")
+            }
+
+            Button {
+                Task { await model.ensureTaskSummary(using: appModel, force: true) }
+            } label: {
+                Label("Regenerate", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.summaryIsLoading || model.isAgentWorking)
+            .accessibilityLabel("Regenerate AI task brief")
+        }
+
+        if model.isAgentWorking, model.visibleGeneratedSummary != nil {
+            Text("This brief will refresh when the current turn finishes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if let error = model.summaryError {
+            Label(
+                model.visibleGeneratedSummary == nil
+                    ? "AI summary unavailable. Showing transcript excerpts instead. \(error)"
+                    : "Could not refresh the AI summary. Keeping the previous brief. \(error)",
+                systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
         }
     }
 
@@ -1376,6 +1704,122 @@ struct ThreadDetailView: View {
         return entries
     }
 
+    private var originalRequest: String? {
+        let requests = model.thread?.messages.filter {
+            $0.role == "user"
+                && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? []
+        guard let original = requests.first else { return nil }
+        let originalText = conciseText(original.text, limit: 800)
+        guard let latest = requests.last, latest.id != original.id else { return originalText }
+        return "\(originalText)\n\nLatest direction\n\(conciseText(latest.text, limit: 400))"
+    }
+
+    private var latestResult: String? {
+        model.thread?.messages.last(where: {
+            $0.role == "assistant"
+                && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }).map { conciseText($0.text) }
+    }
+
+    private var latestCheckpointFiles: [CheckpointFile] {
+        guard let checkpoints = model.thread?.checkpoints else { return [] }
+        if let latestTurnID = model.thread?.latestTurn?.turnId,
+           let checkpoint = checkpoints.last(where: { $0.turnId == latestTurnID }) {
+            return checkpoint.files
+        }
+        return checkpoints.last?.files ?? []
+    }
+
+    private var attentionItems: [TaskAttentionItem] {
+        guard let thread = model.thread else { return [] }
+        var open: [String: TaskAttentionItem] = [:]
+        for activity in thread.activities.sorted(by: {
+            if $0.createdAt == $1.createdAt { return $0.id < $1.id }
+            return $0.createdAt < $1.createdAt
+        }) {
+            guard let requestID = activity.payload["requestId"]?.stringValue else { continue }
+            switch activity.kind {
+            case "approval.requested":
+                let key = "approval:\(requestID)"
+                open[key] = TaskAttentionItem(
+                    id: key,
+                    kind: .approval,
+                    title: activity.summary,
+                    detail: activity.payload["detail"]?.stringValue ?? "Review this approval request.",
+                    createdAt: activity.createdAt
+                )
+            case "user-input.requested":
+                let key = "input:\(requestID)"
+                open[key] = TaskAttentionItem(
+                    id: key,
+                    kind: .input,
+                    title: activity.summary,
+                    detail: userInputSummary(activity.payload) ?? "The agent is waiting for your input.",
+                    createdAt: activity.createdAt
+                )
+            case "approval.resolved":
+                open["approval:\(requestID)"] = nil
+            case "user-input.resolved":
+                open["input:\(requestID)"] = nil
+            case "provider.approval.respond.failed":
+                let detail = activity.payload["detail"]?.stringValue?.lowercased() ?? ""
+                if detail.contains("stale") || detail.contains("unknown") {
+                    open["approval:\(requestID)"] = nil
+                }
+            case "provider.user-input.respond.failed":
+                let detail = activity.payload["detail"]?.stringValue?.lowercased() ?? ""
+                if detail.contains("stale") || detail.contains("unknown") {
+                    open["input:\(requestID)"] = nil
+                }
+            default:
+                break
+            }
+        }
+
+        var items = open.values.sorted {
+            if $0.createdAt == $1.createdAt { return $0.id < $1.id }
+            return $0.createdAt < $1.createdAt
+        }
+        if currentThreadShell?.hasActionableProposedPlan == true {
+            items.append(
+                TaskAttentionItem(
+                    id: "proposed-plan",
+                    kind: .plan,
+                    title: "Plan ready for review",
+                    detail: "Review the proposed plan before the agent starts implementation.",
+                    createdAt: thread.updatedAt
+                )
+            )
+        }
+        if thread.latestTurn?.state == "error",
+           let error = thread.activities.last(where: { $0.tone == "error" }) {
+            items.append(
+                TaskAttentionItem(
+                    id: "error:\(error.id)",
+                    kind: .error,
+                    title: error.summary,
+                    detail: error.payload["detail"]?.stringValue
+                        ?? error.payload["message"]?.stringValue
+                        ?? "The latest turn failed and may need a redirect or retry.",
+                    createdAt: error.createdAt
+                )
+            )
+        }
+        return items
+    }
+
+    private var currentThreadShell: OrchestrationThreadShell? {
+        appModel.snapshot?.threads.first { $0.id == model.threadID }
+            ?? appModel.archivedThreads.first { $0.id == model.threadID }
+    }
+
+    private func conciseText(_ text: String, limit: Int = 1_200) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > limit else { return trimmed }
+        return String(trimmed.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+    }
+
     private var visibleActivities: [OrchestrationActivity] {
         let activities = model.thread?.activities ?? []
         let completedTools = Set(
@@ -1385,6 +1829,8 @@ struct ThreadDetailView: View {
         )
         return activities.filter { activity in
             if activity.tone == "error" || activity.tone == "approval" { return true }
+            if activity.kind == "user-input.requested"
+                || activity.kind == "user-input.resolved" { return true }
             guard activity.tone == "tool" else { return false }
             switch activity.kind {
             case "tool.completed":
@@ -1685,6 +2131,8 @@ private struct ActivityRow: View {
     private var icon: String {
         if activity.tone == "error" { return "exclamationmark.triangle.fill" }
         if activity.tone == "approval" { return "hand.raised.fill" }
+        if activity.kind == "user-input.requested" { return "questionmark.bubble.fill" }
+        if activity.kind == "user-input.resolved" { return "checkmark.bubble.fill" }
         if activity.kind == "tool.started" { return "ellipsis" }
         return switch activity.payload["itemType"]?.stringValue {
         case "command_execution": "terminal"
@@ -1705,8 +2153,131 @@ private struct ActivityRow: View {
     }
 
     private var detail: String? {
-        activity.payload["detail"]?.stringValue
+        if activity.kind == "user-input.requested" {
+            return userInputSummary(activity.payload)
+        }
+        return activity.payload["detail"]?.stringValue
             ?? activity.payload["message"]?.stringValue
+    }
+}
+
+private struct TaskBriefCard: View {
+    let title: String
+    let icon: String
+    let text: String?
+    let emptyText: String
+    let isWorking: Bool
+    let files: [CheckpointFile]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Label(title, systemImage: icon)
+                    .font(.headline)
+                Spacer()
+                if isWorking {
+                    Text("In progress")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                }
+            }
+
+            Text(text ?? emptyText)
+                .foregroundStyle(text == nil ? .secondary : .primary)
+                .textSelection(.enabled)
+
+            if !files.isEmpty {
+                Divider()
+                Label(
+                    "\(files.count) changed \(files.count == 1 ? "file" : "files")",
+                    systemImage: "doc.badge.gearshape"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+                ForEach(Array(files.prefix(6).enumerated()), id: \.offset) { _, file in
+                    HStack(spacing: 8) {
+                        Text(file.path)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text("+\(file.additions) −\(file.deletions)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if files.count > 6 {
+                    Text("+ \(files.count - 6) more")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(18)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TaskAttentionCard: View {
+    let item: TaskAttentionItem
+    let showChat: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(item.title, systemImage: icon)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(tint)
+            Text(item.detail)
+                .font(.callout)
+                .textSelection(.enabled)
+            Button("View in chat", action: showChat)
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+        }
+        .padding(16)
+        .background(tint.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var icon: String {
+        switch item.kind {
+        case .approval: "hand.raised.fill"
+        case .input: "questionmark.bubble.fill"
+        case .plan: "list.bullet.rectangle"
+        case .error: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch item.kind {
+        case .error: .red
+        default: .orange
+        }
+    }
+}
+
+private struct TaskSummaryActionCard: View {
+    let action: String
+
+    var body: some View {
+        Label {
+            Text(action)
+                .font(.callout)
+                .textSelection(.enabled)
+        } icon: {
+            Image(systemName: "questionmark.circle.fill")
+        }
+        .foregroundStyle(.orange)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

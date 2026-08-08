@@ -22,6 +22,7 @@ import {
   type GitActionProgressEvent,
   type GitManagerServiceError,
   OrchestrationDispatchCommandError,
+  OrchestrationGenerateTaskSummaryError,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
@@ -84,6 +85,8 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
+import { buildTaskSummaryContext } from "./textGeneration/TaskSummaryContext.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -372,6 +375,7 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const textGeneration = yield* TextGeneration.TextGeneration;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1127,6 +1131,79 @@ const makeWsRpcLayer = (
                   }),
               ),
             ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.generateTaskSummary]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.generateTaskSummary,
+            Effect.gen(function* () {
+              const thread = yield* projectionSnapshotQuery
+                .getThreadDetailById(input.threadId)
+                .pipe(
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGenerateTaskSummaryError({
+                        message: "Could not load this task for summarization.",
+                      }),
+                  ),
+                );
+              if (Option.isNone(thread)) {
+                return yield* new OrchestrationGenerateTaskSummaryError({
+                  message: "This task no longer exists.",
+                });
+              }
+
+              const project = yield* projectionSnapshotQuery
+                .getProjectShellById(thread.value.projectId)
+                .pipe(
+                  Effect.mapError(
+                    () =>
+                      new OrchestrationGenerateTaskSummaryError({
+                        message: "Could not load this task's project.",
+                      }),
+                  ),
+                );
+              if (Option.isNone(project)) {
+                return yield* new OrchestrationGenerateTaskSummaryError({
+                  message: "This task's project no longer exists.",
+                });
+              }
+
+              const settings = yield* serverSettings.getSettings.pipe(
+                Effect.mapError(
+                  () =>
+                    new OrchestrationGenerateTaskSummaryError({
+                      message: "Could not load the configured summary model.",
+                    }),
+                ),
+              );
+              const modelSelection = settings.textGenerationModelSelection;
+              const generated = yield* textGeneration
+                .generateTaskSummary({
+                  cwd: thread.value.worktreePath ?? project.value.workspaceRoot,
+                  context: buildTaskSummaryContext({
+                    thread: thread.value,
+                    projectTitle: project.value.title,
+                  }),
+                  modelSelection,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new OrchestrationGenerateTaskSummaryError({
+                        message:
+                          error.detail.trim() ||
+                          "The configured model could not generate a task summary.",
+                      }),
+                  ),
+                );
+
+              return {
+                ...generated,
+                modelSelection,
+                generatedAt: yield* nowIso,
+              };
+            }),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.searchThreads]: (input) =>

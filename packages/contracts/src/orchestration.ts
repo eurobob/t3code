@@ -28,6 +28,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
+  generateTaskSummary: "orchestration.generateTaskSummary",
   searchThreads: "orchestration.searchThreads",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
@@ -1536,6 +1537,21 @@ export const OrchestrationSearchThreadsResult = Schema.Struct({
 });
 export type OrchestrationSearchThreadsResult = typeof OrchestrationSearchThreadsResult.Type;
 
+export const OrchestrationGenerateTaskSummaryInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type OrchestrationGenerateTaskSummaryInput =
+  typeof OrchestrationGenerateTaskSummaryInput.Type;
+
+export const OrchestrationGeneratedTaskSummary = Schema.Struct({
+  asked: TrimmedNonEmptyString,
+  done: TrimmedNonEmptyString,
+  needsYou: Schema.Array(TrimmedNonEmptyString),
+  modelSelection: ModelSelection,
+  generatedAt: IsoDateTime,
+});
+export type OrchestrationGeneratedTaskSummary = typeof OrchestrationGeneratedTaskSummary.Type;
+
 export const OrchestrationGetWorkflowScriptInput = Schema.Struct({
   threadId: ThreadId,
   /** Absolute path from the workflow's runHandles.scriptPath. The server
@@ -1601,6 +1617,10 @@ export const OrchestrationRpcSchemas = {
     input: OrchestrationGetFullThreadDiffInput,
     output: OrchestrationGetFullThreadDiffResult,
   },
+  generateTaskSummary: {
+    input: OrchestrationGenerateTaskSummaryInput,
+    output: OrchestrationGeneratedTaskSummary,
+  },
   searchThreads: {
     input: OrchestrationSearchThreadsInput,
     output: OrchestrationSearchThreadsResult,
@@ -1624,6 +1644,13 @@ export class OrchestrationGetSnapshotError extends Schema.TaggedErrorClass<Orche
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationGenerateTaskSummaryError extends Schema.TaggedErrorClass<OrchestrationGenerateTaskSummaryError>()(
+  "OrchestrationGenerateTaskSummaryError",
+  {
+    message: TrimmedNonEmptyString,
   },
 ) {}
 

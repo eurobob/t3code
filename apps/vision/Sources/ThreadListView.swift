@@ -58,6 +58,14 @@ struct ThreadListView: View {
         })
     }
 
+    private var unfinishedThreads: [OrchestrationThreadShell] {
+        visibleThreads.filter { $0.settledAt == nil }
+    }
+
+    private var completedThreads: [OrchestrationThreadShell] {
+        visibleThreads.filter { $0.settledAt != nil }
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -136,8 +144,9 @@ struct ThreadListView: View {
         }
     }
 
+    @ViewBuilder
     private var flatTaskRows: some View {
-        ForEach(visibleThreads) { thread in
+        ForEach(unfinishedThreads) { thread in
             taskLink(
                 thread,
                 projectTitle: projectsByID[thread.projectId]?.title
@@ -145,13 +154,16 @@ struct ThreadListView: View {
         }
         .onMove { source, destination in
             guard filter == .active, searchText.isEmpty else { return }
-            moveThreads(visibleThreads, from: source, to: destination)
+            moveThreads(unfinishedThreads, from: source, to: destination)
         }
+
+        completedTaskRows
     }
 
+    @ViewBuilder
     private var groupedTaskRows: some View {
         ForEach(projects) { project in
-            let projectThreads = visibleThreads.filter { $0.projectId == project.id }
+            let projectThreads = unfinishedThreads.filter { $0.projectId == project.id }
             if !projectThreads.isEmpty {
                 Section {
                     ForEach(projectThreads) { thread in
@@ -177,6 +189,30 @@ struct ThreadListView: View {
                         .accessibilityLabel("New task in \(project.title)")
                     }
                 }
+            }
+        }
+
+        completedTaskRows
+    }
+
+    @ViewBuilder
+    private var completedTaskRows: some View {
+        if !completedThreads.isEmpty {
+            Section {
+                ForEach(completedThreads) { thread in
+                    taskLink(
+                        thread,
+                        projectTitle: projectsByID[thread.projectId]?.title
+                    )
+                }
+                .onMove { source, destination in
+                    guard filter == .active, searchText.isEmpty else { return }
+                    moveThreads(completedThreads, from: source, to: destination)
+                }
+            } header: {
+                Text("Completed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -436,7 +472,7 @@ private struct ThreadRow: View {
             }
             Button(action: onSettle) {
                 Label(
-                    thread.settledAt == nil ? "Mark Done" : "Mark Active",
+                    thread.settledAt == nil ? "Settle" : "Unsettle",
                     systemImage: thread.settledAt == nil
                         ? "checkmark.circle"
                         : "arrow.uturn.backward.circle"

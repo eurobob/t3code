@@ -118,6 +118,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -385,6 +386,7 @@ const buildAppUnderTest = (options?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
+    textGeneration?: Partial<TextGeneration.TextGeneration["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
     vcsDriverRegistry?: Partial<VcsDriverRegistry.VcsDriverRegistry["Service"]>;
@@ -639,14 +641,24 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ServerSettings.ServerSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.serverSettings,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            start: Effect.void,
+            ready: Effect.void,
+            getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            streamChanges: Stream.empty,
+            ...options?.layers?.serverSettings,
+          }),
+          Layer.mock(TextGeneration.TextGeneration)({
+            generateCommitMessage: () => Effect.die("Text generation not stubbed in this test"),
+            generatePrContent: () => Effect.die("Text generation not stubbed in this test"),
+            generateBranchName: () => Effect.die("Text generation not stubbed in this test"),
+            generateThreadTitle: () => Effect.die("Text generation not stubbed in this test"),
+            generateTaskSummary: () => Effect.die("Text generation not stubbed in this test"),
+            ...options?.layers?.textGeneration,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ExternalLauncher.ExternalLauncher)({
@@ -5814,6 +5826,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("routes websocket rpc orchestration methods", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";
+      const taskSummaryInputs: TextGeneration.TaskSummaryGenerationInput[] = [];
       const snapshot = {
         snapshotSequence: 1,
         updatedAt: now,
@@ -5845,7 +5858,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             settledOverride: null,
             settledAt: null,
             latestTurn: null,
-            messages: [],
+            messages: [
+              {
+                id: MessageId.make("message-1"),
+                role: "user" as const,
+                text: "Add a concise task summary.",
+                turnId: null,
+                streaming: false,
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
             session: null,
             activities: [],
             proposedPlans: [],
@@ -5859,6 +5882,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           projectionSnapshotQuery: {
             getSnapshot: () => Effect.succeed(snapshot),
+            getProjectShellById: () => Effect.succeed(Option.some(snapshot.projects[0]!)),
+            getThreadDetailById: () => Effect.succeed(Option.some(snapshot.threads[0]!)),
             searchThreads: () =>
               Effect.succeed({
                 matches: [
@@ -5891,6 +5916,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 toTurnCount: 1,
                 diff: "full-diff",
               }),
+          },
+          textGeneration: {
+            generateTaskSummary: (input) => {
+              taskSummaryInputs.push(input);
+              return Effect.succeed({
+                asked: "Add a concise task summary.",
+                done: "The AI summary path is wired.",
+                needsYou: [],
+              });
+            },
           },
         },
       });
@@ -5928,6 +5963,23 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(fullDiffResult.diff, "full-diff");
+
+      const taskSummary = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.generateTaskSummary]({
+            threadId: ThreadId.make("thread-1"),
+          }),
+        ),
+      );
+      assert.equal(taskSummary.asked, "Add a concise task summary.");
+      assert.equal(taskSummary.done, "The AI summary path is wired.");
+      assert.deepEqual(taskSummary.needsYou, []);
+      assert.equal(taskSummaryInputs[0]?.cwd, "/tmp/project-a");
+      assert.include(taskSummaryInputs[0]?.context ?? "", "USER");
+      assert.deepEqual(
+        taskSummaryInputs[0]?.modelSelection,
+        DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+      );
 
       const searchResult = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>

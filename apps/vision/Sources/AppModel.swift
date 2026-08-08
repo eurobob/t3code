@@ -382,6 +382,11 @@ final class AppModel {
         return try await client.threadSnapshot(id: id)
     }
 
+    func generateTaskSummary(threadID: String) async throws -> GeneratedTaskSummary {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.generateTaskSummary(threadID: threadID)
+    }
+
     func threadEvents(
         threadID: String,
         after sequence: Int

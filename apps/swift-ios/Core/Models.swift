@@ -391,6 +391,14 @@ public struct CheckpointSummary: Codable, Equatable, Sendable {
     public let completedAt: String
 }
 
+public struct GeneratedTaskSummary: Codable, Equatable, Sendable {
+    public let asked: String
+    public let done: String
+    public let needsYou: [String]
+    public let modelSelection: ModelSelection
+    public let generatedAt: String
+}
+
 public struct OrchestrationThread: Codable, Identifiable, Equatable, Sendable {
     public let id: String
     public let projectId: String
