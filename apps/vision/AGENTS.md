@@ -18,7 +18,7 @@ Priorities, in order:
 The motivating complaint: on the iPad app, agents on long-running goals cannot
 be steered or stopped. Messages sent while a turn is running are queued, not
 delivered. The stop button is unreliable. Coming from a terminal where ESC halts
-an agent instantly, this makes the harness unusable. Fixing that *interaction*
+an agent instantly, this makes the harness unusable. Fixing that _interaction_
 is the job.
 
 ## Where the code lives
@@ -149,6 +149,18 @@ output from a compact header error control instead of presenting a modal sheet.
 The terminal subscription is established before the command is written, so
 immediate guard failures are not lost.
 
+Task detail opens to a concise, AI-generated Summary that puts unresolved
+decisions first, then shows "What you asked", "What was done", and latest
+checkpoint file changes. Generation runs on the T3 server through its configured
+text-generation model (including Claude Sonnet when selected), and the Vision
+client caches the result per environment/task revision. It refreshes after the
+task changes, waits for active turns to settle, and offers manual regeneration.
+Exact unresolved approval/input state remains deterministic so an AI summary
+cannot hide a required response. The summary remains the primary task surface;
+the full conversation opens beside it as a trailing third panel. That panel's
+open state is persisted per task, and its control lives inside the summary so it
+does not compete with global task actions such as Deploy.
+
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or
 another terminal state if completion wins the race), then send the redirect as
@@ -187,6 +199,7 @@ func shellSnapshot(timeoutInterval: TimeInterval? = nil) async throws -> Orchest
 func shellEvents(after: Int? = nil) async -> AsyncThrowingStream<ShellStreamItem, Error>
 func threadSnapshot(id: String) async throws -> OrchestrationThreadDetailSnapshot
 func threadEvents(threadID: String, after: Int? = nil) async -> AsyncThrowingStream<ThreadStreamItem, Error>
+func generateTaskSummary(threadID: String) async throws -> GeneratedTaskSummary
 
 func sendTurn(...) async throws -> DispatchResult
 func interrupt(threadID: String, turnID: String? = nil) async throws -> DispatchResult

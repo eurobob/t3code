@@ -73,6 +73,15 @@ public actor T3Client {
         )
     }
 
+    public func generateTaskSummary(threadID: String) async throws -> GeneratedTaskSummary {
+        try await rpc.request(
+            RPCMethod.generateTaskSummary.rawValue,
+            payload: .object(["threadId": .string(threadID)]),
+            responseTimeout: .seconds(190),
+            as: GeneratedTaskSummary.self
+        )
+    }
+
     public func threadSnapshot(
         id: String,
         turnLimit: Int? = nil,
@@ -1205,6 +1214,7 @@ public enum RPCMethod: String, Sendable {
     case serverProbe = "server.probe"
     case serverGetConfig = "server.getConfig"
     case dispatchCommand = "orchestration.dispatchCommand"
+    case generateTaskSummary = "orchestration.generateTaskSummary"
     case getArchivedShellSnapshot = "orchestration.getArchivedShellSnapshot"
     case subscribeShell = "orchestration.subscribeShell"
     case subscribeThread = "orchestration.subscribeThread"

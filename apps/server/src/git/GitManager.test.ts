@@ -292,6 +292,12 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateTaskSummary: () =>
+      Effect.succeed({
+        asked: "Update the workflow.",
+        done: "The workflow was updated.",
+        needsYou: [],
+      }),
     ...overrides,
   };
 
@@ -335,6 +341,17 @@ function createTextGeneration(
           (cause) =>
             new TextGenerationError({
               operation: "generateThreadTitle",
+              detail: "fake text generation failed",
+              ...(cause !== undefined ? { cause } : {}),
+            }),
+        ),
+      ),
+    generateTaskSummary: (input) =>
+      implementation.generateTaskSummary(input).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation: "generateTaskSummary",
               detail: "fake text generation failed",
               ...(cause !== undefined ? { cause } : {}),
             }),

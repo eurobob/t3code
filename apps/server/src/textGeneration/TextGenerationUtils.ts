@@ -63,6 +63,20 @@ export function sanitizeThreadTitle(raw: string): string {
   return `${normalized.slice(0, 47).trimEnd()}...`;
 }
 
+export function sanitizeTaskSummary(input: {
+  readonly asked: string;
+  readonly done: string;
+  readonly needsYou: ReadonlyArray<string>;
+}) {
+  const asked = input.asked.trim() || "The task request is not clear yet.";
+  const done = input.done.trim() || "No completed work has been reported yet.";
+  const needsYou = input.needsYou
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 5);
+  return { asked, done, needsYou };
+}
+
 /** CLI name to human-readable label, e.g. "codex" → "Codex CLI (`codex`)" */
 function cliLabel(cliName: string): string {
   const capitalized = cliName.charAt(0).toUpperCase() + cliName.slice(1);

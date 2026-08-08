@@ -123,6 +123,31 @@ final class WebSocketRPCRaceTests: XCTestCase {
         await client.stop()
     }
 
+    func testRequestCanUseALongerResponseTimeout() async throws {
+        let connection = DeadlineWebSocketConnection()
+        let client = WebSocketRPCClient(
+            connector: SequencedConnector(connections: [connection]),
+            connectionWaitTimeout: .seconds(2),
+            responseTimeout: .milliseconds(40),
+            endpointProvider: { URL(string: "wss://studio.example/ws")! }
+        )
+
+        let request = Task {
+            try await client.request(
+                "orchestration.generateTaskSummary",
+                responseTimeout: .milliseconds(200),
+                as: JSONValue.self
+            )
+        }
+        await connection.waitUntilRequestCount(1)
+        try await Task.sleep(for: .milliseconds(80))
+        try await connection.replyToRequest(at: 0)
+
+        let response = try await request.value
+        XCTAssertEqual(response, .object(["ok": .bool(true)]))
+        await client.stop()
+    }
+
     func testCancellingUnaryRemovesItAndInterruptsSentWork() async throws {
         let connection = DeadlineWebSocketConnection()
         let client = WebSocketRPCClient(

@@ -73,6 +73,19 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface TaskSummaryGenerationInput {
+  cwd: string;
+  context: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface TaskSummaryGenerationResult {
+  asked: string;
+  done: string;
+  needsYou: ReadonlyArray<string>;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -80,10 +93,11 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generateTaskSummary(input: TaskSummaryGenerationInput): Promise<TaskSummaryGenerationResult>;
 }
 
 /**
- * TextGeneration - Service tag for commit and change request text generation.
+ * TextGeneration - Service tag for short, structured model-generated text.
  */
 export class TextGeneration extends Context.Service<
   TextGeneration,
@@ -113,6 +127,11 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /** Generate a compact status brief from a task's durable thread history. */
+    readonly generateTaskSummary: (
+      input: TaskSummaryGenerationInput,
+    ) => Effect.Effect<TaskSummaryGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -123,7 +142,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateTaskSummary";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -162,6 +182,10 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generateTaskSummary: (input) =>
+      resolveInstance(registry, "generateTaskSummary", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateTaskSummary(input)),
       ),
   });
 
