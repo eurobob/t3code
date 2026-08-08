@@ -18,6 +18,7 @@ private enum VisionSelection: Hashable {
 struct ThreadListView: View {
     @SwiftUI.Environment(AppModel.self) private var model
     @SwiftUI.Environment(\.openWindow) private var openWindow
+    @SwiftUI.Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
 
     @AppStorage("vision.tasks.groupByProject") private var groupByProject = false
     @State private var selection: VisionSelection?
@@ -314,7 +315,9 @@ struct ThreadListView: View {
             .disabled(projects.isEmpty)
 
             Button {
-                SpeechLabLog.logger.notice("Opening Speech Lab from the task list")
+                SpeechLabLog.logger.notice(
+                    "Opening Speech Lab; multiple windows supported: \(supportsMultipleWindows, privacy: .public)"
+                )
                 openWindow(id: "thread", value: VisionWindowRoute.speechLab)
             } label: {
                 Label("Speech Lab", systemImage: "waveform.and.mic")
