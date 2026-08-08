@@ -29,6 +29,12 @@ struct T3VisionApp: App {
             .environment(model)
         }
         .defaultSize(width: 820, height: 780)
+
+        WindowGroup(id: "speech-lab") {
+            SpeechComparisonLabView()
+                .environment(model)
+        }
+        .defaultSize(width: 1_100, height: 760)
     }
 }
 

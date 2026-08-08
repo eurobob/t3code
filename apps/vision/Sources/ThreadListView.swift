@@ -17,6 +17,7 @@ private enum VisionSelection: Hashable {
 
 struct ThreadListView: View {
     @SwiftUI.Environment(AppModel.self) private var model
+    @SwiftUI.Environment(\.openWindow) private var openWindow
 
     @AppStorage("vision.tasks.groupByProject") private var groupByProject = false
     @State private var selection: VisionSelection?
@@ -324,6 +325,12 @@ struct ThreadListView: View {
                     selection = .newProject(UUID())
                 } label: {
                     Label("New Project", systemImage: "folder.badge.plus")
+                }
+                Divider()
+                Button {
+                    openWindow(id: "speech-lab")
+                } label: {
+                    Label("Speech Lab", systemImage: "waveform.and.mic")
                 }
                 Divider()
                 Button("Disconnect") { Task { await model.signOut() } }

@@ -19,6 +19,9 @@ packages:
     url: https://github.com/clerk/clerk-ios.git
     minVersion: 0.1.0
     maxVersion: 100.0.0
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    exactVersion: 1.1.0
 
 settings:
   base:
@@ -65,6 +68,8 @@ targets:
       # provider, which is how the iOS client now signs in.
       - package: Clerk
         product: ClerkKitUI
+      - package: ArgmaxOSS
+        product: WhisperKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.t3tools.t3code.vision
