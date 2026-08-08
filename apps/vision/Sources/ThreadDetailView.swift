@@ -774,10 +774,6 @@ final class ThreadDetailModel {
             return
         }
         guard !dictationActive else { return }
-        guard VisionWhisperKitService.shared.isReady else {
-            dictationError = VisionDictationError.modelUnavailable.localizedDescription
-            return
-        }
 
         dictationActive = true
         committedDictation = ""
@@ -1818,7 +1814,7 @@ struct ThreadDetailView: View {
                     .tint(.red)
                     .foregroundStyle(.white)
                 }
-            } else if let label = dictationService.state.label {
+            } else if let label = dictationService.statusLabel {
                 HStack(spacing: 8) {
                     if dictationService.state.isPreparing {
                         ProgressView()
@@ -1968,56 +1964,37 @@ struct ThreadDetailView: View {
         }
     }
 
-    @ViewBuilder
     private var dictationButton: some View {
-        if model.isDictating || dictationService.isReady {
-            Button {
-                if model.isDictating {
-                    model.finishDictation()
-                } else {
-                    dictationBaseline = model.draft
-                    draftEditorMode = .hidden
-                    model.beginDictation(vocabulary: appModel.dictationVocabulary)
-                }
-            } label: {
-                Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 76, height: 76)
-                    .background(microphoneColor, in: Circle())
-                    .overlay {
-                        Circle()
-                            .stroke(Color.white.opacity(0.72), lineWidth: 2)
-                            .padding(5)
-                    }
-                    .contentShape(.interaction, Circle())
-                    .contentShape(.hoverEffect, Circle())
+        Button {
+            if model.isDictating {
+                model.finishDictation()
+            } else {
+                dictationBaseline = model.draft
+                draftEditorMode = .hidden
+                model.beginDictation(vocabulary: appModel.dictationVocabulary)
             }
-            .buttonStyle(.plain)
-            .hoverEffect(.lift)
-            .onHover { microphoneHovered = $0 }
-            .animation(.easeOut(duration: 0.12), value: microphoneHovered)
-            .animation(.easeOut(duration: 0.12), value: model.isDictating)
-            .opacity(model.isBusy ? 0.4 : 1)
-            .disabled(model.isBusy)
-            .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
-        } else {
-            ZStack {
-                Circle()
-                    .fill(Color.secondary.opacity(0.18))
-                if dictationService.state.isPreparing {
-                    ProgressView()
-                        .controlSize(.large)
-                } else {
-                    Image(systemName: "mic.slash.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.secondary)
+        } label: {
+            Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 76, height: 76)
+                .background(microphoneColor, in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.72), lineWidth: 2)
+                        .padding(5)
                 }
-            }
-            .frame(width: 76, height: 76)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Dictation unavailable")
+                .contentShape(.interaction, Circle())
+                .contentShape(.hoverEffect, Circle())
         }
+        .buttonStyle(.plain)
+        .hoverEffect(.lift)
+        .onHover { microphoneHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: microphoneHovered)
+        .animation(.easeOut(duration: 0.12), value: model.isDictating)
+        .opacity(model.isBusy ? 0.4 : 1)
+        .disabled(model.isBusy)
+        .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
     }
 
     private var microphoneColor: Color {

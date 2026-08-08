@@ -260,18 +260,18 @@ dependent, so a timed mid-tool integration test is still required.
 
 ## Dictation
 
-T3 Vision uses WhisperKit with the multilingual Base model. Model
-preparation starts concurrently with app restoration at launch, reuses the
-device cache, and retains the loaded pipeline for the app session. The composer
-shows the shared preparation stage and does not expose a recording control until
-the model is genuinely ready. Throttled partial passes update the dictation HUD
-while the user speaks; a final full-buffer pass commits the most accurate
-transcript into the draft after the user stops recording.
+T3 Vision dictation is a staged, additive pipeline. Apple's SpeechAnalyzer is
+available immediately and owns the microphone capture. WhisperKit preparation
+starts concurrently with app restoration: multilingual Base (about 147 MB)
+first, then compressed Large v3 (about 626 MB). The record control is never
+gated on either model.
 
-The Base model is the interactive default because its Core ML package is about
-147 MB; the 626 MB compressed Large v3 model took minutes to load on Vision Pro.
-Seed every pass with prompt tokens from T3's domain vocabulary and the live
-shell snapshot to recover project, branch, and product terminology.
+The same 16 kHz microphone buffer feeds every tier. System results remain the
+fallback for the whole utterance. Once a WhisperKit tier returns a successful
+partial result, it can replace the volatile preview without restarting capture;
+the best tier available at stop makes the final pass. Seed every WhisperKit pass
+with prompt tokens from T3's domain vocabulary and the live shell snapshot to
+recover project, branch, and product terminology.
 
 Cancel rolls back only if the draft still ends with exactly what dictation
 appended, so a mid-dictation edit is never eaten. The composer continues to

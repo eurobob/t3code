@@ -5,46 +5,27 @@ import OSLog
 import WhisperKit
 
 enum VisionDictationError: LocalizedError {
+    case localeUnsupported
     case microphonePermissionDenied
-    case modelUnavailable
 
     var errorDescription: String? {
         switch self {
+        case .localeUnsupported:
+            "Dictation does not support this device's language yet."
         case .microphonePermissionDenied:
             "T3 Vision needs microphone access to dictate."
-        case .modelUnavailable:
-            "WhisperKit is not ready yet."
         }
     }
 }
 
 enum VisionDictationPreparationState: Equatable, Sendable {
     case notStarted
-    case checkingCache
-    case downloading(Int)
-    case loading
-    case loadingSlowly
+    case checkingCache(String)
+    case downloading(String, Int)
+    case loading(String)
+    case loadingSlowly(String)
     case ready
-    case failed(String)
-
-    var label: String? {
-        switch self {
-        case .notStarted:
-            "WhisperKit has not started loading."
-        case .checkingCache:
-            "Checking WhisperKit model cache…"
-        case let .downloading(percentage):
-            "Downloading WhisperKit model… \(percentage)%"
-        case .loading:
-            "Loading WhisperKit…"
-        case .loadingSlowly:
-            "WhisperKit is taking longer than expected to load. Dictation will become available when it is ready."
-        case .ready:
-            nil
-        case let .failed(message):
-            "WhisperKit is unavailable: \(message)"
-        }
-    }
+    case failed(String, String)
 
     var isPreparing: Bool {
         switch self {
@@ -56,6 +37,16 @@ enum VisionDictationPreparationState: Equatable, Sendable {
     var isFailure: Bool {
         if case .failed = self { return true }
         return false
+    }
+
+    var preparingModel: String? {
+        switch self {
+        case let .checkingCache(model), let .downloading(model, _),
+             let .loading(model), let .loadingSlowly(model):
+            model
+        case .notStarted, .ready, .failed:
+            nil
+        }
     }
 }
 
@@ -73,12 +64,83 @@ private final class VisionWhisperKitProgressReporter: @unchecked Sendable {
     }
 }
 
+private struct VisionWhisperKitModelSpec: Sendable {
+    let variant: String
+    let folderName: String
+    let displayName: String
+
+    static let base = VisionWhisperKitModelSpec(
+        variant: "base",
+        folderName: "openai_whisper-base",
+        displayName: "WhisperKit Base"
+    )
+    static let large = VisionWhisperKitModelSpec(
+        variant: "large-v3-v20240930_626MB",
+        folderName: "openai_whisper-large-v3-v20240930_626MB",
+        displayName: "WhisperKit Large v3"
+    )
+}
+
+@MainActor
+final class VisionWhisperKitSession {
+    enum Tier: Int, Sendable {
+        case base = 1
+        case large = 2
+    }
+
+    let tier: Tier
+    let engineName: String
+    private let whisperKit: WhisperKit
+    private let promptTokens: [Int]?
+
+    init(
+        whisperKit: WhisperKit,
+        tier: Tier,
+        engineName: String,
+        contextualStrings: [String]
+    ) {
+        self.whisperKit = whisperKit
+        self.tier = tier
+        self.engineName = engineName
+
+        let domainVocabulary = [
+            "T3 Code", "visionOS", "WhisperKit", "Codex", "Claude",
+            "OpenCode", "Tailscale",
+        ]
+        let vocabulary = (domainVocabulary + contextualStrings)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if let tokenizer = whisperKit.tokenizer, !vocabulary.isEmpty {
+            promptTokens = tokenizer
+                .encode(text: " " + vocabulary.joined(separator: ", "))
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+        } else {
+            promptTokens = nil
+        }
+    }
+
+    func transcribe(audioSamples: [Float]) async throws -> String {
+        let results = try await whisperKit.transcribe(
+            audioArray: audioSamples,
+            decodeOptions: DecodingOptions(
+                language: nil,
+                temperature: 0,
+                detectLanguage: true,
+                withoutTimestamps: true,
+                promptTokens: promptTokens
+            )
+        )
+        return results
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
 @MainActor
 @Observable
 final class VisionWhisperKitService {
     static let shared = VisionWhisperKitService()
-    static let model = "base"
-    private static var cachedModelFolderName: String { "openai_whisper-\(model)" }
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
         category: "Dictation"
@@ -86,14 +148,39 @@ final class VisionWhisperKitService {
 
     private(set) var state = VisionDictationPreparationState.notStarted
     @ObservationIgnored
-    private var whisperKit: WhisperKit?
+    private var baseKit: WhisperKit?
+    @ObservationIgnored
+    private var largeKit: WhisperKit?
     @ObservationIgnored
     private var preparationTask: Task<Void, Never>?
 
-    var isReady: Bool { state == .ready && whisperKit != nil }
+    var activeEngineName: String {
+        if largeKit != nil { return "WhisperKit Large v3" }
+        if baseKit != nil { return "WhisperKit Base" }
+        return "System dictation"
+    }
+
+    var statusLabel: String? {
+        switch state {
+        case .notStarted:
+            "System dictation ready · Starting WhisperKit upgrades…"
+        case let .checkingCache(model):
+            "\(activeEngineName) ready · Checking \(model) cache…"
+        case let .downloading(model, percentage):
+            "\(activeEngineName) ready · Downloading \(model)… \(percentage)%"
+        case let .loading(model):
+            "\(activeEngineName) ready · Loading \(model)…"
+        case let .loadingSlowly(model):
+            "\(activeEngineName) remains available · \(model) is taking longer than expected to load."
+        case .ready:
+            nil
+        case let .failed(model, message):
+            "\(activeEngineName) remains available · \(model) could not load: \(message)"
+        }
+    }
 
     func prepareIfNeeded() async {
-        if isReady { return }
+        if largeKit != nil { return }
         if let preparationTask {
             await preparationTask.value
             return
@@ -113,123 +200,105 @@ final class VisionWhisperKitService {
         await prepareIfNeeded()
     }
 
-    func promptTokens(contextualStrings: [String]) -> [Int]? {
-        guard let tokenizer = whisperKit?.tokenizer else { return nil }
-        let domainVocabulary = [
-            "T3 Code", "visionOS", "WhisperKit", "Codex", "Claude",
-            "OpenCode", "Tailscale",
-        ]
-        let vocabulary = (domainVocabulary + contextualStrings)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !vocabulary.isEmpty else { return nil }
-        return tokenizer
-            .encode(text: " " + vocabulary.joined(separator: ", "))
-            .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
-    }
-
-    func transcribe(audioURL: URL, promptTokens: [Int]?) async throws -> String {
-        guard let whisperKit, state == .ready else {
-            throw VisionDictationError.modelUnavailable
+    func bestSession(contextualStrings: [String]) -> VisionWhisperKitSession? {
+        if let largeKit {
+            return VisionWhisperKitSession(
+                whisperKit: largeKit,
+                tier: .large,
+                engineName: VisionWhisperKitModelSpec.large.displayName,
+                contextualStrings: contextualStrings
+            )
         }
-        let results = try await whisperKit.transcribe(
-            audioPath: audioURL.path,
-            decodeOptions: Self.decodingOptions(promptTokens: promptTokens)
-        )
-        return Self.joinedText(from: results)
-    }
-
-    func transcribe(audioSamples: [Float], promptTokens: [Int]?) async throws -> String {
-        guard let whisperKit, state == .ready else {
-            throw VisionDictationError.modelUnavailable
+        if let baseKit {
+            return VisionWhisperKitSession(
+                whisperKit: baseKit,
+                tier: .base,
+                engineName: VisionWhisperKitModelSpec.base.displayName,
+                contextualStrings: contextualStrings
+            )
         }
-        let results = try await whisperKit.transcribe(
-            audioArray: audioSamples,
-            decodeOptions: Self.decodingOptions(promptTokens: promptTokens)
-        )
-        return Self.joinedText(from: results)
-    }
-
-    private static func decodingOptions(promptTokens: [Int]?) -> DecodingOptions {
-        DecodingOptions(
-            language: nil,
-            temperature: 0,
-            detectLanguage: true,
-            withoutTimestamps: true,
-            promptTokens: promptTokens
-        )
-    }
-
-    private static func joinedText(from results: [TranscriptionResult]) -> String {
-        return results
-            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        return nil
     }
 
     private func runPreparation() async {
-        state = .checkingCache
-        Self.logger.notice("Checking the local WhisperKit model cache")
-        do {
-            let modelFolder: URL
-            if let cachedModelFolder = Self.cachedModelFolder() {
-                modelFolder = cachedModelFolder
-                Self.logger.notice("Using the cached WhisperKit model")
-            } else {
-                let progressReporter = VisionWhisperKitProgressReporter()
-                modelFolder = try await WhisperKit.download(
-                    variant: Self.model,
-                    progressCallback: { progress in
-                        guard let percentage = progressReporter.nextPercentage(from: progress) else {
-                            return
-                        }
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            switch state {
-                            case .checkingCache, .downloading:
-                                state = .downloading(percentage)
-                            case .notStarted, .loading, .loadingSlowly, .ready, .failed:
-                                return
-                            }
-                            Self.logger.notice("Downloading the WhisperKit model: \(percentage)%")
-                        }
-                    }
+        if baseKit == nil {
+            do {
+                baseKit = try await loadModel(.base)
+                Self.logger.notice("WhisperKit Base is ready")
+            } catch {
+                Self.logger.error(
+                    "WhisperKit Base failed: \(error.localizedDescription, privacy: .public)"
                 )
             }
+        }
 
-            state = .loading
-            Self.logger.notice("Loading the WhisperKit model")
-            let slowLoadingTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .seconds(15))
-                guard !Task.isCancelled, self?.state == .loading else { return }
-                self?.state = .loadingSlowly
-            }
-            defer { slowLoadingTask.cancel() }
-
-            let whisperKit = try await WhisperKit(WhisperKitConfig(
-                modelFolder: modelFolder.path,
-                verbose: false,
-                prewarm: false,
-                load: false,
-                download: false
-            ))
-            try await whisperKit.loadModels()
-            self.whisperKit = whisperKit
+        guard largeKit == nil else {
             state = .ready
-            Self.logger.notice("WhisperKit is ready for dictation")
+            return
+        }
+        do {
+            largeKit = try await loadModel(.large)
+            state = .ready
+            Self.logger.notice("WhisperKit Large v3 is ready")
         } catch {
-            state = .failed(error.localizedDescription)
+            state = .failed(
+                VisionWhisperKitModelSpec.large.displayName,
+                error.localizedDescription
+            )
             Self.logger.error(
-                "WhisperKit preparation failed: \(error.localizedDescription, privacy: .public)"
+                "WhisperKit Large v3 failed: \(error.localizedDescription, privacy: .public)"
             )
         }
     }
 
-    private static func cachedModelFolder() -> URL? {
+    private func loadModel(_ spec: VisionWhisperKitModelSpec) async throws -> WhisperKit {
+        state = .checkingCache(spec.displayName)
+        Self.logger.notice("Checking the \(spec.displayName, privacy: .public) cache")
+
+        let modelFolder: URL
+        if let cachedModelFolder = Self.cachedModelFolder(spec) {
+            modelFolder = cachedModelFolder
+        } else {
+            let progressReporter = VisionWhisperKitProgressReporter()
+            modelFolder = try await WhisperKit.download(
+                variant: spec.variant,
+                progressCallback: { progress in
+                    guard let percentage = progressReporter.nextPercentage(from: progress) else {
+                        return
+                    }
+                    Task { @MainActor [weak self] in
+                        guard let self, state.preparingModel == spec.displayName else { return }
+                        state = .downloading(spec.displayName, percentage)
+                    }
+                }
+            )
+        }
+
+        state = .loading(spec.displayName)
+        let slowLoadingTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, let self,
+                  state == .loading(spec.displayName) else { return }
+            state = .loadingSlowly(spec.displayName)
+        }
+        defer { slowLoadingTask.cancel() }
+
+        let whisperKit = try await WhisperKit(WhisperKitConfig(
+            modelFolder: modelFolder.path,
+            verbose: false,
+            prewarm: false,
+            load: false,
+            download: false
+        ))
+        try await whisperKit.loadModels()
+        return whisperKit
+    }
+
+    private static func cachedModelFolder(_ spec: VisionWhisperKitModelSpec) -> URL? {
         let repository = HubApiWrapper.Repo(id: "argmaxinc/whisperkit-coreml")
         let folder = HubApiWrapper.shared
             .localRepoLocation(repository)
-            .appending(path: cachedModelFolderName)
+            .appending(path: spec.folderName)
         let requiredModels = ["MelSpectrogram", "AudioEncoder", "TextDecoder"]
         let hasRequiredModels = requiredModels.allSatisfy { name in
             FileManager.default.fileExists(
@@ -242,8 +311,8 @@ final class VisionWhisperKitService {
     }
 }
 
-/// Records one utterance and transcribes it locally with WhisperKit. Partial
-/// passes update the HUD; one final full-buffer pass commits text on stop.
+/// Starts with Apple's recognizer and additively upgrades the same buffered
+/// utterance through whichever WhisperKit tier becomes available.
 @MainActor
 final class VisionDictationController {
     private static let liveUpdateSampleInterval = 24_000
@@ -252,16 +321,30 @@ final class VisionDictationController {
         category: "Dictation"
     )
 
-    private let recorder = SpeechLabRecorder()
+    private let systemController = VisionSystemDictationController()
     private var isRunning = false
     private var liveTranscriptionTask: Task<Void, Never>?
     private var bufferContinuation: AsyncStream<Void>.Continuation?
-    private var promptTokens: [Int]?
+    private var contextualStrings: [String] = []
+    private var systemFinalizedText = ""
+    private var systemVolatileText = ""
+    private var whisperPreviewTier: VisionWhisperKitSession.Tier?
 
-    // Partial text is presentation-only; the full-buffer pass is finalized.
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
     var onError: (@MainActor @Sendable (String) -> Void)?
+
+    init() {
+        systemController.onVolatile = { [weak self] text in
+            self?.handleSystemVolatile(text)
+        }
+        systemController.onFinalized = { [weak self] text in
+            self?.handleSystemFinalized(text)
+        }
+        systemController.onError = { [weak self] message in
+            self?.onError?(message)
+        }
+    }
 
     static func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -273,28 +356,26 @@ final class VisionDictationController {
 
     func start(contextualStrings: [String]) async throws {
         guard !isRunning else { return }
-        guard VisionWhisperKitService.shared.isReady else {
-            throw VisionDictationError.modelUnavailable
-        }
-        // Keep domain and live shell vocabulary stable across partial passes.
-        promptTokens = VisionWhisperKitService.shared.promptTokens(
-            contextualStrings: contextualStrings
-        )
-        try Task.checkCancellation()
+        self.contextualStrings = contextualStrings
+        systemFinalizedText = ""
+        systemVolatileText = ""
+        whisperPreviewTier = nil
 
         let (bufferSignals, continuation) = AsyncStream.makeStream(
             of: Void.self,
             bufferingPolicy: .bufferingNewest(1)
         )
+        systemController.onBufferCaptured = {
+            continuation.yield(())
+        }
         do {
-            try recorder.start {
-                continuation.yield(())
-            }
+            try await systemController.start(contextualStrings: contextualStrings)
         } catch {
             continuation.finish()
-            promptTokens = nil
+            systemController.onBufferCaptured = nil
             throw error
         }
+
         bufferContinuation = continuation
         isRunning = true
         liveTranscriptionTask = Task { [weak self] in
@@ -305,39 +386,64 @@ final class VisionDictationController {
     func finish() async {
         guard isRunning else { return }
         isRunning = false
-        defer { promptTokens = nil }
-        let recording: SpeechLabRecording
-        do {
-            recording = try recorder.stop()
-        } catch {
-            await stopLiveUpdates()
-            onError?(error.localizedDescription)
-            return
-        }
-
+        let samples = systemController.snapshotSamples()
+        await systemController.finish()
         await stopLiveUpdates()
-        defer { try? FileManager.default.removeItem(at: recording.fileURL) }
-        do {
-            let text = try await VisionWhisperKitService.shared.transcribe(
-                audioURL: recording.fileURL,
-                promptTokens: promptTokens
-            )
-            if !text.isEmpty { onFinalized?(text) }
-        } catch is CancellationError {
-            return
-        } catch {
-            onError?(error.localizedDescription)
+
+        let fallbackText = combinedSystemText
+        if let session = VisionWhisperKitService.shared.bestSession(
+            contextualStrings: contextualStrings
+        ), !samples.isEmpty {
+            do {
+                let text = try await session.transcribe(audioSamples: samples)
+                if !text.isEmpty {
+                    onFinalized?(text)
+                    resetUtterance()
+                    return
+                }
+            } catch {
+                Self.logger.error(
+                    "Final \(session.engineName, privacy: .public) transcription failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
+        if !fallbackText.isEmpty { onFinalized?(fallbackText) }
+        resetUtterance()
     }
 
     func cancel() async {
-        if isRunning { recorder.cancel() }
         isRunning = false
+        await systemController.cancel()
         await stopLiveUpdates()
-        promptTokens = nil
+        resetUtterance()
+    }
+
+    private var combinedSystemText: String {
+        [systemFinalizedText, systemVolatileText]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func handleSystemVolatile(_ text: String) {
+        systemVolatileText = text
+        guard whisperPreviewTier == nil else { return }
+        onVolatile?(combinedSystemText)
+    }
+
+    private func handleSystemFinalized(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        systemFinalizedText = [systemFinalizedText, trimmed]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        systemVolatileText = ""
+        guard whisperPreviewTier == nil else { return }
+        onVolatile?(combinedSystemText)
     }
 
     private func stopLiveUpdates() async {
+        systemController.onBufferCaptured = nil
         bufferContinuation?.finish()
         bufferContinuation = nil
         liveTranscriptionTask?.cancel()
@@ -349,28 +455,35 @@ final class VisionDictationController {
         var lastTranscribedSampleCount = 0
         for await _ in signals {
             guard !Task.isCancelled, isRunning else { return }
-            let samples = recorder.snapshotSamples()
+            let samples = systemController.snapshotSamples()
             guard samples.count >= Self.liveUpdateSampleInterval,
                   samples.count - lastTranscribedSampleCount
-                    >= Self.liveUpdateSampleInterval else { continue }
+                    >= Self.liveUpdateSampleInterval,
+                  let session = VisionWhisperKitService.shared.bestSession(
+                    contextualStrings: contextualStrings
+                  ) else { continue }
             lastTranscribedSampleCount = samples.count
 
             do {
-                let text = try await VisionWhisperKitService.shared.transcribe(
-                    audioSamples: samples,
-                    promptTokens: promptTokens
-                )
+                let text = try await session.transcribe(audioSamples: samples)
                 guard !Task.isCancelled, isRunning else { return }
+                guard !text.isEmpty else { continue }
+                whisperPreviewTier = session.tier
                 onVolatile?(text)
             } catch is CancellationError {
                 return
             } catch {
-                // A partial pass should not discard the recording. The final
-                // pass after stop can still succeed and report a useful error.
                 Self.logger.error(
-                    "Live transcription update failed: \(error.localizedDescription, privacy: .public)"
+                    "Live \(session.engineName, privacy: .public) transcription failed: \(error.localizedDescription, privacy: .public)"
                 )
             }
         }
+    }
+
+    private func resetUtterance() {
+        contextualStrings = []
+        systemFinalizedText = ""
+        systemVolatileText = ""
+        whisperPreviewTier = nil
     }
 }
