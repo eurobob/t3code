@@ -12,6 +12,44 @@ struct VisionModelOption: Identifiable, Equatable {
     var label: String { "\(providerName) · \(modelName)" }
 }
 
+private struct ThreadDetailCache {
+    private static let capacity = 12
+
+    private var snapshotsByThreadID: [String: OrchestrationThreadDetailSnapshot] = [:]
+    private var recentThreadIDs: [String] = []
+
+    mutating func snapshot(for threadID: String) -> OrchestrationThreadDetailSnapshot? {
+        guard let snapshot = snapshotsByThreadID[threadID] else { return nil }
+        markRecent(threadID)
+        return snapshot
+    }
+
+    mutating func store(_ snapshot: OrchestrationThreadDetailSnapshot) {
+        let threadID = snapshot.thread.id
+        if let cached = snapshotsByThreadID[threadID],
+           cached.snapshotSequence > snapshot.snapshotSequence {
+            markRecent(threadID)
+            return
+        }
+        snapshotsByThreadID[threadID] = snapshot
+        markRecent(threadID)
+
+        while recentThreadIDs.count > Self.capacity {
+            snapshotsByThreadID.removeValue(forKey: recentThreadIDs.removeFirst())
+        }
+    }
+
+    mutating func removeAll() {
+        snapshotsByThreadID.removeAll(keepingCapacity: true)
+        recentThreadIDs.removeAll(keepingCapacity: true)
+    }
+
+    private mutating func markRecent(_ threadID: String) {
+        recentThreadIDs.removeAll { $0 == threadID }
+        recentThreadIDs.append(threadID)
+    }
+}
+
 /// Owns the connection for the whole app.
 ///
 /// Deliberately thin: `T3ConnectController`, `EnvironmentRuntime` and `T3Client`
@@ -68,6 +106,10 @@ final class AppModel {
     private var client: T3Client?
     private var eventsTask: Task<Void, Never>?
     private var configEventsTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var threadDetailCache = ThreadDetailCache()
+    @ObservationIgnored
+    private var threadDetailCacheEnvironmentID: String?
 
     @ObservationIgnored
     private lazy var pairingService = PairingService(
@@ -267,6 +309,7 @@ final class AppModel {
     }
 
     private func adopt(_ environment: Environment) async {
+        prepareThreadDetailCache(for: environment.id)
         self.environment = environment
         phase = .connecting
 
@@ -347,6 +390,8 @@ final class AppModel {
         archivedThreads = []
         serverConfig = nil
         threadOrder = []
+        threadDetailCache.removeAll()
+        threadDetailCacheEnvironmentID = nil
         environment = nil
         phase = account == nil ? .signedOut : .choosingEnvironment
     }
@@ -379,7 +424,21 @@ final class AppModel {
 
     func threadSnapshot(id: String) async throws -> OrchestrationThreadDetailSnapshot {
         guard let client else { throw ClientError.notConnected }
-        return try await client.threadSnapshot(id: id)
+        let snapshot = try await client.threadSnapshot(id: id)
+        storeThreadSnapshot(snapshot)
+        return snapshot
+    }
+
+    func cachedThreadSnapshot(id: String) -> OrchestrationThreadDetailSnapshot? {
+        guard let environment else { return nil }
+        prepareThreadDetailCache(for: environment.id)
+        return threadDetailCache.snapshot(for: id)
+    }
+
+    func storeThreadSnapshot(_ snapshot: OrchestrationThreadDetailSnapshot) {
+        guard let environment else { return }
+        prepareThreadDetailCache(for: environment.id)
+        threadDetailCache.store(snapshot)
     }
 
     func generateTaskSummary(threadID: String) async throws -> GeneratedTaskSummary {
@@ -603,6 +662,12 @@ final class AppModel {
 
     private func threadOrderKey(environmentID: String) -> String {
         "codes.t3.vision.thread-order.\(environmentID)"
+    }
+
+    private func prepareThreadDetailCache(for environmentID: String) {
+        guard threadDetailCacheEnvironmentID != environmentID else { return }
+        threadDetailCache.removeAll()
+        threadDetailCacheEnvironmentID = environmentID
     }
 
     private func isAvailable(_ selection: ModelSelection) -> Bool {

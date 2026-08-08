@@ -36,11 +36,14 @@ Security, which is why it ports to visionOS unmodified.
 
 The canonical integration branch for this client is `visionos` on the
 `eurobob/t3code` fork. Start feature branches from the latest `origin/visionos`,
-then merge completed work back into `visionos` and push it to that fork before
-handoff unless the user explicitly asks to keep the work separate. Do not leave
-finished Vision work only on a ticket-specific branch, and do not use upstream
-`main` as the Vision integration target. Fetch immediately before integration
-so concurrent Vision work is preserved rather than replaced.
+using a separate worktree, and keep the work there for user testing and
+validation. The `visionos` branch is the eventual integration destination, not
+an automatic handoff step. **Never merge into or push `visionos` without the
+user's explicit approval after they have validated the feature.** A request to
+branch from `visionos`, implement the feature, commit it, or prepare it for
+testing does not grant that approval. Do not use upstream `main` as the Vision
+integration target. Once the user authorizes integration, fetch immediately
+before merging so concurrent Vision work is preserved rather than replaced.
 
 ## Building
 
@@ -107,6 +110,9 @@ The microphone is an unlabeled circular target with neutral, hover, and recordin
 colors. Selecting another task assigns the detail view that thread's identity so
 SwiftUI cannot retain the previous thread model. Auto-scroll targets a spacer
 after the final message to preserve breathing room above the voice dock.
+An active dictation session continues when visionOS hides T3 Vision for another
+app's immersive space, and its mixable audio session leaves that app's audio
+audible while feedback is recorded.
 Connection failures preserve the saved environment and Keychain credential;
 the failure screen identifies the saved host and retries it directly instead
 of forcing another pairing exchange.
@@ -140,6 +146,10 @@ visibility Boolean, so it appears only while the transcript is actually away
 from the bottom; content and voice-dock growth do not expose it during follow.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
+Recently viewed conversations are kept in a bounded, environment-scoped memory
+cache. Returning to a task renders its transcript immediately and resumes the
+thread stream from the cached sequence, while first visits still load an
+authoritative snapshot.
 
 Every task shows one T3-owned Deploy action in the header; repositories do not
 configure it and do not need a deploy entry in `t3.json`. The action runs from
@@ -154,12 +164,22 @@ immediate guard failures are not lost.
 Task detail opens to the full Conversation. A global Summary control opens a
 concise AI brief as a trailing third panel and keeps that choice while switching
 tasks. Opening the panel requests a wider visionOS window so the task sidebar,
-conversation, and summary retain readable widths. The brief puts unresolved
+conversation, and summary retain readable widths; closing it restores the
+compact width. The brief puts unresolved
 decisions first, then shows "What you asked", "What was done", and latest
-checkpoint file changes. Generation runs on the T3 server through its configured
-text-generation model (including Claude Sonnet when selected), and the Vision
-client caches the result per environment/task revision. It refreshes after the
-task changes, waits for active turns to settle, and offers manual regeneration.
+checkpoint file changes. Generation runs a bounded, non-interactive Claude
+Sonnet request through the environment's existing terminal transport; it does
+not add a visible task turn, depend on the server's configured utility model, or
+require a new server RPC. Identical, placeholder, and progress-only results are
+rejected and regenerated once instead of being shown. The Vision client caches
+validated results per environment/task revision. Its information hierarchy is
+return-to-ticket oriented: required user decisions/actions appear first, a
+two-line "At a glance" card identifies the ticket and latest meaningful update,
+and up to three completed outcomes provide secondary memory-refresh context.
+Decisions and actions are not separate categories, optional user input is hidden
+when absent, and file inventories are omitted. It generates a stable snapshot
+while a turn is active, refreshes after that turn settles, and offers manual
+regeneration.
 Exact unresolved approval/input state remains deterministic so an AI summary
 cannot hide a required response.
 

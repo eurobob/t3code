@@ -3,12 +3,38 @@ import Observation
 import SwiftUI
 import UIKit
 
+struct VisionTaskBrief: Codable, Equatable {
+    let ticket: String
+    let latest: String
+    let done: [String]
+    let needsYou: [String]
+    let modelSelection: ModelSelection
+    let generatedAt: String
+}
+
 @MainActor
 @Observable
 final class ThreadDetailModel {
     private struct CachedTaskSummary: Codable {
         let sourceRevision: String
-        let summary: GeneratedTaskSummary
+        let summary: VisionTaskBrief
+    }
+
+    private struct ClaudeSummaryEnvelope: Decodable {
+        struct Payload: Codable {
+            let ticket: String
+            let latest: String
+            let done: [String]
+            let needsYou: [String]
+        }
+
+        let structuredOutput: Payload?
+        let result: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case structuredOutput = "structured_output"
+            case result
+        }
     }
 
     enum LoadState: Equatable {
@@ -114,6 +140,37 @@ final class ThreadDetailModel {
         }
     }
 
+    private enum SummaryFallbackError: LocalizedError {
+        case threadUnavailable
+        case terminalStreamEnded
+        case terminalClosed
+        case commandFailed(String)
+        case malformedResponse
+        case lowQualityResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .threadUnavailable:
+                "The task workspace is unavailable."
+            case .terminalStreamEnded:
+                "The summary process stopped before returning a result."
+            case .terminalClosed:
+                "The summary terminal closed before returning a result."
+            case let .commandFailed(detail):
+                "Claude Sonnet could not generate the task summary. \(detail)"
+            case .malformedResponse:
+                "Claude Sonnet returned an unreadable task summary."
+            case .lowQualityResponse:
+                "Claude Sonnet did not return a useful task summary. Try regenerating it."
+            }
+        }
+    }
+
+    private enum SummaryCommandResult {
+        case success(String)
+        case failure(String)
+    }
+
     private enum TurnSettlement {
         case interrupted
         case alreadySettled(String)
@@ -136,7 +193,7 @@ final class ThreadDetailModel {
     private(set) var submissionRevision = 0
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
-    private(set) var generatedSummary: GeneratedTaskSummary?
+    private(set) var generatedSummary: VisionTaskBrief?
     private(set) var generatedSummaryRevision: String?
     private(set) var summaryIsLoading = false
     private(set) var summaryError: String?
@@ -265,7 +322,14 @@ final class ThreadDetailModel {
         ].joined(separator: ":")
     }
 
-    var visibleGeneratedSummary: GeneratedTaskSummary? {
+    var summaryGenerationTaskID: String {
+        if isAgentWorking {
+            return "working:\(activeTurnID ?? thread?.latestTurn?.turnId ?? "pending")"
+        }
+        return "settled:\(summarySourceRevision ?? "none")"
+    }
+
+    var visibleGeneratedSummary: VisionTaskBrief? {
         if isAgentWorking || summaryIsLoading {
             return generatedSummary
         }
@@ -275,6 +339,13 @@ final class ThreadDetailModel {
 
     func start(using appModel: AppModel) async {
         guard eventsTask == nil else { return }
+        if let cached = appModel.cachedThreadSnapshot(id: threadID) {
+            apply(cached)
+            loadState = .loaded
+            startEvents(after: cached.snapshotSequence, using: appModel)
+            return
+        }
+
         loadState = .loading
         do {
             let snapshot = try await appModel.threadSnapshot(id: threadID)
@@ -302,7 +373,6 @@ final class ThreadDetailModel {
 
     func ensureTaskSummary(using appModel: AppModel, force: Bool = false) async {
         guard !summaryIsLoading,
-              !isAgentWorking,
               let sourceRevision = summarySourceRevision else { return }
         let cacheKey = taskSummaryCacheKey(environmentID: appModel.environment?.id)
 
@@ -323,9 +393,9 @@ final class ThreadDetailModel {
         defer { summaryIsLoading = false }
         summaryError = nil
         do {
-            let summary = try await appModel.generateTaskSummary(threadID: threadID)
+            let summary = try await generateTaskSummaryWithClaude(using: appModel)
             try Task.checkCancellation()
-            guard summarySourceRevision == sourceRevision else { return }
+            guard isAgentWorking || summarySourceRevision == sourceRevision else { return }
             generatedSummary = summary
             generatedSummaryRevision = sourceRevision
             if let data = try? JSONEncoder().encode(
@@ -340,8 +410,287 @@ final class ThreadDetailModel {
         }
     }
 
+    /// Uses the environment's Claude subscription without adding a visible
+    /// turn or mutating the task conversation. Keeping this client-owned avoids
+    /// changing behavior with the T3 server version or configured utility model.
+    private func generateTaskSummaryWithClaude(
+        using appModel: AppModel
+    ) async throws -> VisionTaskBrief {
+        guard let thread,
+              let project = appModel.snapshot?.projects.first(where: {
+                  $0.id == thread.projectId
+              }) else { throw SummaryFallbackError.threadUnavailable }
+
+        let schema = #"{"type":"object","properties":{"ticket":{"type":"string","maxLength":160},"latest":{"type":"string","maxLength":160},"done":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":3},"needsYou":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3}},"required":["ticket","latest","done","needsYou"],"additionalProperties":false}"#
+        var rejectedDraft: ClaudeSummaryEnvelope.Payload?
+
+        for _ in 0..<2 {
+            let prompt = taskSummaryPrompt(
+                for: thread,
+                projectTitle: project.title,
+                rejectedDraft: rejectedDraft
+            )
+            let encodedPrompt = Data(prompt.utf8).base64EncodedString()
+            let terminalID = "vision-summary-\(UUID().uuidString.lowercased())"
+            let marker = "__T3_VISION_SUMMARY_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+            let command = """
+            stty -echo; t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -d 2>/dev/null)" || t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -D)"; t3_summary_output="$(printf %s "$t3_summary_prompt" | claude -p --model sonnet --tools '' --no-session-persistence --permission-mode dontAsk --output-format json --json-schema '\(schema)' 2>&1)"; t3_summary_status=$?; printf '\n\(marker)BEGIN\n%s\n\(marker)END:%s\n' "$t3_summary_output" "$t3_summary_status"; stty echo
+            """
+
+            let rawResponse = try await runSummaryCommand(
+                command,
+                marker: marker,
+                terminalID: terminalID,
+                thread: thread,
+                project: project,
+                using: appModel
+            )
+            let payload = try decodeClaudeSummary(rawResponse)
+            if let summary = validatedTaskSummary(payload) {
+                return summary
+            }
+            rejectedDraft = payload
+        }
+
+        throw SummaryFallbackError.lowQualityResponse
+    }
+
+    private func decodeClaudeSummary(_ rawResponse: String) throws -> ClaudeSummaryEnvelope.Payload {
+        let envelope = try JSONDecoder.t3.decode(
+            ClaudeSummaryEnvelope.self,
+            from: Data(rawResponse.utf8)
+        )
+        if let structuredOutput = envelope.structuredOutput {
+            return structuredOutput
+        }
+        if let result = envelope.result,
+           let data = result.data(using: .utf8),
+           let decoded = try? JSONDecoder.t3.decode(
+               ClaudeSummaryEnvelope.Payload.self,
+               from: data
+           ) {
+            return decoded
+        }
+        throw SummaryFallbackError.malformedResponse
+    }
+
+    private func validatedTaskSummary(
+        _ payload: ClaudeSummaryEnvelope.Payload
+    ) -> VisionTaskBrief? {
+        let ticket = normalizedSummaryItem(payload.ticket)
+        let latest = normalizedSummaryItem(payload.latest)
+        let done = normalizedSummaryItems(payload.done, limit: 3)
+        let needsYou = normalizedSummaryItems(payload.needsYou, limit: 3)
+        let normalizedTicket = normalizedSummaryField(ticket)
+        let normalizedLatest = normalizedSummaryField(latest)
+        let normalizedDone = done.map(normalizedSummaryField)
+        let normalizedNeedsYou = needsYou.map(normalizedSummaryField)
+        let allCategorizedItems = [normalizedTicket, normalizedLatest]
+            + normalizedDone + normalizedNeedsYou
+        let placeholders: Set<String> = ["test", "testing", "none", "unknown", "n a", "na", "todo", "tbd"]
+        let processNarration = [
+            "agent is working on this now",
+            "agent is currently working",
+            "currently working on this",
+        ]
+
+        guard !ticket.isEmpty,
+              !latest.isEmpty,
+              !done.isEmpty,
+              ticket.count <= 160,
+              latest.count <= 160,
+              done.allSatisfy({ $0.count <= 120 }),
+              needsYou.allSatisfy({ $0.count <= 120 }),
+              allCategorizedItems.allSatisfy({ !placeholders.contains($0) }),
+              Set(allCategorizedItems).count == allCategorizedItems.count,
+              !processNarration.contains(where: { phrase in
+                  normalizedDone.contains(where: { $0.contains(phrase) })
+              }) else { return nil }
+
+        return VisionTaskBrief(
+            ticket: ticket,
+            latest: latest,
+            done: done,
+            needsYou: needsYou,
+            modelSelection: ModelSelection(instanceId: "claude", model: "sonnet"),
+            generatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+    }
+
+    private func normalizedSummaryItems(_ items: [String], limit: Int) -> [String] {
+        items.prefix(limit).map(normalizedSummaryItem).filter { !$0.isEmpty }
+    }
+
+    private func normalizedSummaryItem(_ item: String) -> String {
+        item
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^[•\-*]\s*"#, with: "", options: .regularExpression)
+    }
+
+    private func normalizedSummaryField(_ value: String) -> String {
+        value
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func runSummaryCommand(
+        _ command: String,
+        marker: String,
+        terminalID: String,
+        thread: OrchestrationThread,
+        project: OrchestrationProject,
+        using appModel: AppModel
+    ) async throws -> String {
+        var terminalOpened = false
+        defer {
+            if terminalOpened {
+                Task {
+                    try? await appModel.closeTerminal(
+                        threadID: thread.id,
+                        terminalID: terminalID
+                    )
+                }
+            }
+        }
+
+        let initial = try await appModel.openTerminal(
+            threadID: thread.id,
+            terminalID: terminalID,
+            cwd: thread.worktreePath ?? project.workspaceRoot,
+            worktreePath: thread.worktreePath,
+            environmentVariables: [:]
+        )
+        terminalOpened = true
+        if initial.status == .error || initial.status == .exited {
+            throw SummaryFallbackError.commandFailed("The terminal could not start.")
+        }
+
+        let stream = try await appModel.attachTerminal(
+            threadID: thread.id,
+            terminalID: terminalID
+        )
+        var iterator = stream.makeAsyncIterator()
+        try await appModel.writeTerminal(
+            threadID: thread.id,
+            terminalID: terminalID,
+            data: "\(command)\r"
+        )
+
+        var output = initial.history
+        while let event = try await iterator.next() {
+            if let eventThreadID = event.threadId,
+               let eventTerminalID = event.terminalId,
+               (eventThreadID != thread.id || eventTerminalID != terminalID) {
+                continue
+            }
+            switch event.type {
+            case "snapshot", "started", "restarted":
+                if let snapshot = event.snapshot { output = snapshot.history }
+            case "output":
+                if let data = event.data {
+                    output.append(contentsOf: data)
+                    if output.count > 200_000 {
+                        output = String(output.suffix(160_000))
+                    }
+                }
+            case "error":
+                throw SummaryFallbackError.commandFailed(
+                    event.message ?? "The terminal reported an error."
+                )
+            case "closed", "exited":
+                throw SummaryFallbackError.terminalClosed
+            default:
+                break
+            }
+
+            if let result = extractSummaryResponse(from: output, marker: marker) {
+                switch result {
+                case let .success(response): return response
+                case let .failure(detail): throw SummaryFallbackError.commandFailed(detail)
+                }
+            }
+        }
+        throw SummaryFallbackError.terminalStreamEnded
+    }
+
+    private func extractSummaryResponse(
+        from output: String,
+        marker: String
+    ) -> SummaryCommandResult? {
+        let normalized = output
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard let begin = normalized.range(
+            of: "\(marker)BEGIN\n",
+            options: .backwards
+        ), let end = normalized.range(
+                  of: "\n\(marker)END:",
+                  range: begin.upperBound..<normalized.endIndex
+              ) else { return nil }
+        let statusStart = end.upperBound
+        let status = normalized[statusStart...].prefix { $0.isNumber }
+        guard let exitCode = Int(status) else { return nil }
+        let response = String(normalized[begin.upperBound..<end.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if exitCode == 0 { return .success(response) }
+        return .failure(response.isEmpty ? "The command exited with status \(exitCode)." : response)
+    }
+
+    private func taskSummaryPrompt(
+        for thread: OrchestrationThread,
+        projectTitle: String,
+        rejectedDraft: ClaudeSummaryEnvelope.Payload?
+    ) -> String {
+        var sections = [
+            "Project: \(projectTitle)",
+            "Task: \(thread.title)",
+            "Write a return-to-ticket brief for someone who has not seen this task in a week. "
+                + "Optimize for understanding in seconds, not completeness. Plain language; no "
+                + "paragraphs, headings, or implementation diary. 'ticket': one line, at most 160 "
+                + "characters, explaining what this ticket is trying to achieve. 'latest': one "
+                + "line, at most 160 characters, stating the most recent meaningful result, finding, "
+                + "blocker, or correction—never generic 'working on it' status. 'done': at most 3 "
+                + "short lines naming concrete outcomes already completed or verified. 'needsYou': "
+                + "at most 3 decisions or actions the user must take now; combine decisions and "
+                + "actions here and return an empty array when none are required. Never ask the "
+                + "user to confirm a choice they already stated. Treat the latest user correction "
+                + "as authoritative. If the user rejects or criticizes an earlier result, do not "
+                + "list that result as done. Commit titles and agent completion claims are not "
+                + "verification. Do not "
+                + "repeat facts across fields, include file inventories, or invent results.",
+        ]
+        if let rejectedDraft {
+            sections.append(
+                "A previous draft was rejected as placeholder or duplicated content. Replace it "
+                    + "with terse, distinct content. Rejected ticket: \(rejectedDraft.ticket)\n"
+                    + "Rejected latest: \(rejectedDraft.latest)\nRejected done: "
+                    + rejectedDraft.done.joined(separator: " | ")
+            )
+        }
+        let messages = thread.messages.suffix(40).map {
+            "\($0.role.uppercased()): \(String($0.text.prefix(2_000)))"
+        }
+        if !messages.isEmpty {
+            sections.append("Conversation:\n\(messages.joined(separator: "\n\n"))")
+        }
+        let activities = thread.activities.suffix(20).map {
+            "\($0.kind): \($0.summary)"
+        }
+        if !activities.isEmpty {
+            sections.append("Recent activity:\n\(activities.joined(separator: "\n"))")
+        }
+        if let checkpoint = thread.checkpoints.last {
+            let files = checkpoint.files.prefix(30).map { "\($0.kind) \($0.path)" }
+            sections.append("Latest checkpoint:\n\(files.joined(separator: "\n"))")
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
     private func taskSummaryCacheKey(environmentID: String?) -> String {
-        "codes.t3.vision.task-summary.\(environmentID ?? "unknown").\(threadID)"
+        "codes.t3.vision.task-summary.v5.\(environmentID ?? "unknown").\(threadID)"
     }
 
     func submit(using appModel: AppModel) {
@@ -681,6 +1030,7 @@ final class ThreadDetailModel {
                     case .synchronized:
                         liveError = nil
                     case let .snapshot(snapshot):
+                        appModel.storeThreadSnapshot(snapshot)
                         apply(snapshot)
                     case .event:
                         scheduleRefresh(using: appModel)
@@ -887,6 +1237,7 @@ final class ThreadDetailModel {
             case .synchronized:
                 snapshot = nil
             case let .snapshot(replacement):
+                appModel.storeThreadSnapshot(replacement)
                 snapshot = replacement
             case .event:
                 snapshot = try await appModel.threadSnapshot(id: threadID)
@@ -1109,7 +1460,8 @@ struct ThreadDetailView: View {
         .background {
             VisionWindowWidthController(
                 isExpanded: showsSummaryPanel,
-                expandedWidth: 1_480
+                expandedWidth: 1_480,
+                collapsedWidth: 900
             )
             .frame(width: 0, height: 0)
         }
@@ -1251,52 +1603,35 @@ struct ThreadDetailView: View {
                             TaskSummaryActionCard(action: action)
                         }
                     }
+                } else {
+                    Label("Nothing needs you", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                TaskBriefCard(
-                    title: "What you asked",
-                    icon: "text.bubble",
-                    text: model.visibleGeneratedSummary?.asked
-                        ?? (model.summaryError == nil ? nil : originalRequest),
-                    emptyText: model.summaryIsLoading
-                        ? "Generating an AI brief…"
-                        : "The task request has not arrived yet.",
-                    isWorking: false,
-                    files: []
+                TaskAtAGlanceCard(
+                    ticket: model.visibleGeneratedSummary?.ticket ?? fallbackTicketSummary,
+                    latest: model.visibleGeneratedSummary?.latest ?? fallbackLatestSummary,
+                    isLoading: model.summaryIsLoading
                 )
 
                 TaskBriefCard(
                     title: "What was done",
                     icon: "checkmark.circle",
-                    text: model.visibleGeneratedSummary?.done
-                        ?? (model.summaryError == nil ? nil : latestResult),
+                    items: model.visibleGeneratedSummary?.done ?? latestResult.map { [$0] },
                     emptyText: model.summaryIsLoading
                         ? "Reading the task history…"
-                        : (model.isAgentWorking
-                            ? "The agent is working on this now."
-                            : "The agent has not returned a result yet."),
+                        : "No completed outcome has been recorded yet.",
                     isWorking: model.isAgentWorking,
-                    files: latestCheckpointFiles
+                    files: []
                 )
-
-                if pendingAttention.isEmpty && generatedActions.isEmpty {
-                    Label(
-                        model.isAgentWorking
-                            ? "Nothing needs your input while the agent works."
-                            : "No decision or action is waiting on you.",
-                        systemImage: "checkmark.circle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 4)
-                }
             }
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
             .padding(20)
         }
-        .task(id: "\(model.summarySourceRevision ?? "none"):\(model.isAgentWorking)") {
+        .task(id: model.summaryGenerationTaskID) {
             await model.ensureTaskSummary(using: appModel)
         }
     }
@@ -1325,7 +1660,7 @@ struct ThreadDetailView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else if model.summaryIsLoading {
-                    Text("Using the text-generation model configured on the server")
+                    Text("Summarizing with Claude Sonnet")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -1340,7 +1675,7 @@ struct ThreadDetailView: View {
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(.bordered)
-            .disabled(model.summaryIsLoading || model.isAgentWorking)
+            .disabled(model.summaryIsLoading)
             .accessibilityLabel("Regenerate AI task brief")
         }
 
@@ -1707,15 +2042,20 @@ struct ThreadDetailView: View {
         return entries
     }
 
-    private var originalRequest: String? {
+    private var fallbackTicketSummary: String? {
         let requests = model.thread?.messages.filter {
             $0.role == "user"
                 && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } ?? []
         guard let original = requests.first else { return nil }
-        let originalText = conciseText(original.text, limit: 800)
-        guard let latest = requests.last, latest.id != original.id else { return originalText }
-        return "\(originalText)\n\nLatest direction\n\(conciseText(latest.text, limit: 400))"
+        return conciseText(original.text, limit: 180)
+    }
+
+    private var fallbackLatestSummary: String? {
+        if let latestResult {
+            return conciseText(latestResult, limit: 180)
+        }
+        return model.isAgentWorking ? "A new update is in progress." : nil
     }
 
     private var latestResult: String? {
@@ -1723,15 +2063,6 @@ struct ThreadDetailView: View {
             $0.role == "assistant"
                 && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }).map { conciseText($0.text) }
-    }
-
-    private var latestCheckpointFiles: [CheckpointFile] {
-        guard let checkpoints = model.thread?.checkpoints else { return [] }
-        if let latestTurnID = model.thread?.latestTurn?.turnId,
-           let checkpoint = checkpoints.last(where: { $0.turnId == latestTurnID }) {
-            return checkpoint.files
-        }
-        return checkpoints.last?.files ?? []
     }
 
     private var attentionItems: [TaskAttentionItem] {
@@ -2164,10 +2495,48 @@ private struct ActivityRow: View {
     }
 }
 
+private struct TaskAtAGlanceCard: View {
+    let ticket: String?
+    let latest: String?
+    let isLoading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("At a glance", systemImage: "scope")
+                .font(.headline)
+
+            glanceRow(label: "Ticket", text: ticket ?? ticketPlaceholder)
+            Divider()
+            glanceRow(label: "Latest", text: latest ?? latestPlaceholder)
+        }
+        .padding(16)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func glanceRow(label: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var ticketPlaceholder: String {
+        isLoading ? "Summarizing the ticket…" : "No ticket request is available."
+    }
+
+    private var latestPlaceholder: String {
+        isLoading ? "Finding the latest meaningful update…" : "No update has been recorded yet."
+    }
+}
+
 private struct TaskBriefCard: View {
     let title: String
     let icon: String
-    let text: String?
+    let items: [String]?
     let emptyText: String
     let isWorking: Bool
     let files: [CheckpointFile]
@@ -2188,9 +2557,24 @@ private struct TaskBriefCard: View {
                 }
             }
 
-            Text(text ?? emptyText)
-                .foregroundStyle(text == nil ? .secondary : .primary)
-                .textSelection(.enabled)
+            if let items, !items.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        HStack(alignment: .top, spacing: 9) {
+                            Circle()
+                                .fill(Color.secondary)
+                                .frame(width: 5, height: 5)
+                                .padding(.top, 7)
+                            Text(item)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            } else {
+                Text(emptyText)
+                    .foregroundStyle(.secondary)
+            }
 
             if !files.isEmpty {
                 Divider()

@@ -1,11 +1,12 @@
 import SwiftUI
 import UIKit
 
-/// Requests enough horizontal room for an optional trailing panel. Closing the
-/// panel leaves the user's window width alone instead of unexpectedly shrinking it.
+/// Requests enough horizontal room for an optional trailing panel and restores
+/// the compact workspace width when that panel closes.
 struct VisionWindowWidthController: UIViewRepresentable {
     let isExpanded: Bool
     let expandedWidth: CGFloat
+    let collapsedWidth: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -16,7 +17,8 @@ struct VisionWindowWidthController: UIViewRepresentable {
         context.coordinator.update(
             view: view,
             isExpanded: isExpanded,
-            expandedWidth: expandedWidth
+            expandedWidth: expandedWidth,
+            collapsedWidth: collapsedWidth
         )
         return view
     }
@@ -25,29 +27,31 @@ struct VisionWindowWidthController: UIViewRepresentable {
         context.coordinator.update(
             view: view,
             isExpanded: isExpanded,
-            expandedWidth: expandedWidth
+            expandedWidth: expandedWidth,
+            collapsedWidth: collapsedWidth
         )
     }
 
     @MainActor
     final class Coordinator {
-        private var requestedExpansion = false
+        private var requestedWidth: CGFloat?
 
-        func update(view: UIView, isExpanded: Bool, expandedWidth: CGFloat) {
-            guard isExpanded else {
-                requestedExpansion = false
-                return
-            }
-            guard !requestedExpansion else { return }
+        func update(
+            view: UIView,
+            isExpanded: Bool,
+            expandedWidth: CGFloat,
+            collapsedWidth: CGFloat
+        ) {
+            let targetWidth = isExpanded ? expandedWidth : collapsedWidth
+            guard requestedWidth != targetWidth else { return }
             DispatchQueue.main.async { [weak self, weak view] in
                 guard let self, let view, let windowScene = view.window?.windowScene else { return }
                 let currentWidth = view.window?.bounds.width ?? expandedWidth
-                let requestedWidth = max(currentWidth, expandedWidth)
-                requestedExpansion = true
-                guard abs(currentWidth - requestedWidth) > 1 else { return }
+                requestedWidth = targetWidth
+                guard abs(currentWidth - targetWidth) > 1 else { return }
                 let preferences = UIWindowScene.GeometryPreferences.Vision(
                     size: CGSize(
-                        width: requestedWidth,
+                        width: targetWidth,
                         height: UIProposedSceneSizeNoPreference
                     ),
                     minimumSize: nil,
