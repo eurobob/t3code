@@ -1550,60 +1550,64 @@ struct ThreadDetailView: View {
 
             VisionAttachmentStrip(attachments: $model.attachments)
 
-            HStack(alignment: .center, spacing: 18) {
-                VisionImageAttachmentPicker(
-                    attachments: $model.attachments,
-                    isEnabled: !model.isBusy && !model.isDictating
-                )
-
-                Button {
-                    if draftEditorMode == .hidden {
-                        draftEditorMode = prefersHardwareEditor
-                            ? .hardwareKeyboard
-                            : .softwareKeyboard
-                    } else {
-                        draftEditorMode = .hidden
-                    }
-                } label: {
-                    Image(
-                        systemName: draftEditorMode == .hidden
-                            ? "keyboard"
-                            : "keyboard.chevron.compact.down"
+            ZStack {
+                HStack(alignment: .center, spacing: 12) {
+                    VisionImageAttachmentPicker(
+                        attachments: $model.attachments,
+                        isEnabled: !model.isBusy && !model.isDictating
                     )
-                    .font(.title3)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+
+                    Button {
+                        if draftEditorMode == .hidden {
+                            draftEditorMode = prefersHardwareEditor
+                                ? .hardwareKeyboard
+                                : .softwareKeyboard
+                        } else {
+                            draftEditorMode = .hidden
+                        }
+                    } label: {
+                        Image(
+                            systemName: draftEditorMode == .hidden
+                                ? "keyboard"
+                                : "keyboard.chevron.compact.down"
+                        )
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(
+                        draftEditorMode == .hidden
+                            ? "Show message editor"
+                            : "Hide message editor"
+                    )
+
+                    Spacer()
+
+                    Button {
+                        if model.isDictating {
+                            model.finishDictationAndSubmit(using: appModel)
+                        } else {
+                            model.submit(using: appModel)
+                        }
+                    } label: {
+                        Label("Send", systemImage: "arrow.up")
+                            .font(.body.weight(.semibold))
+                            .frame(minWidth: 96, minHeight: 52)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .tint(.blue)
+                    .disabled(
+                        model.isBusy
+                            || (!model.isDictating
+                                && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                && model.attachments.isEmpty)
+                    )
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityLabel(
-                    draftEditorMode == .hidden ? "Show message editor" : "Hide message editor"
-                )
 
                 dictationButton
-
-                Button {
-                    if model.isDictating {
-                        model.finishDictationAndSubmit(using: appModel)
-                    } else {
-                        model.submit(using: appModel)
-                    }
-                } label: {
-                    Label("Send", systemImage: "arrow.up")
-                        .font(.body.weight(.semibold))
-                        .frame(minWidth: 96, minHeight: 52)
-                }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.capsule)
-                .tint(.blue)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .disabled(
-                    model.isBusy
-                        || (!model.isDictating
-                            && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            && model.attachments.isEmpty)
-                    )
             }
 
         }
