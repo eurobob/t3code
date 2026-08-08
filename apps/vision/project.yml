@@ -80,7 +80,7 @@ targets:
       properties:
         # An active recording starts while T3 Vision is visible, then continues
         # when visionOS hides its windows for another app's immersive space.
-        UIBackgroundModes: [audio]
+        UIBackgroundModes: [audio, screen-capture]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         T3ConnectClerkPublishableKey: $(T3CODE_CLERK_PUBLISHABLE_KEY)

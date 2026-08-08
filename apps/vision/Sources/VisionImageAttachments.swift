@@ -39,6 +39,7 @@ struct VisionImageAttachmentPicker: View {
     @State private var showsFiles = false
     @State private var isPreparing = false
     @State private var errorMessage: String?
+    @State private var screenCapture = VisionScreenCaptureController()
 
     init(
         attachments: Binding<[VisionDraftAttachment]>,
@@ -52,7 +53,7 @@ struct VisionImageAttachmentPicker: View {
         Button {
             showsSources = true
         } label: {
-            Image(systemName: isPreparing ? "hourglass" : "paperclip")
+            Image(systemName: isPreparing || screenCapture.isActive ? "hourglass" : "paperclip")
                 .font(.title3)
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
@@ -61,7 +62,11 @@ struct VisionImageAttachmentPicker: View {
         .foregroundStyle(.secondary)
         .disabled(!canAdd)
         .opacity(canAdd ? 1 : 0.35)
-        .accessibilityLabel(isPreparing ? "Preparing image" : "Add image")
+        .accessibilityLabel(
+            screenCapture.isActive
+                ? screenCapture.statusLabel
+                : (isPreparing ? "Preparing image" : "Add image")
+        )
         .confirmationDialog("Add image", isPresented: $showsSources) {
             Button("Photo Library") {
                 Task {
@@ -75,24 +80,36 @@ struct VisionImageAttachmentPicker: View {
                     showsFiles = true
                 }
             }
-            Button(
-                VisionScreenCapture.isSupported
-                    ? "Capture Shared Content"
-                    : "Capture Shared Content (Unavailable)"
-            ) {
+            Button("Screenshot Window") {
                 Task {
                     try? await Task.sleep(for: .milliseconds(300))
-                    captureSharedContent()
+                    beginCapture(.window)
                 }
             }
-            .disabled(!VisionScreenCapture.isSupported)
+            .disabled(!VisionScreenCaptureController.isSupported)
+            Button("Screenshot Immersive View (5 Seconds)") {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    beginCapture(.immersive)
+                }
+            }
+            .disabled(!VisionScreenCaptureController.isSupported)
             Button("Cancel", role: .cancel) {}
         } message: {
-            if VisionScreenCapture.isSupported {
-                Text("Capture Shared Content lets you choose a window or other shareable content and attaches one frame.")
+            if VisionScreenCaptureController.isSupported {
+                Text("Window capture waits for your shutter. Immersive capture uses an audible five-second countdown after you select the full display.")
             } else {
                 Text("Screen recording is unavailable or not allowed on this device.")
             }
+        }
+        .popover(
+            isPresented: Binding(
+                get: { screenCapture.showsControls },
+                set: { if !$0 { screenCapture.cancel() } }
+            ),
+            arrowEdge: .bottom
+        ) {
+            VisionScreenCaptureControls(controller: screenCapture)
         }
         .sheet(isPresented: $showsPhotos) {
             VisionPhotoLibraryPicker(
@@ -122,10 +139,13 @@ struct VisionImageAttachmentPicker: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .onDisappear { screenCapture.cancel() }
     }
 
     private var remainingCount: Int { max(0, 8 - attachments.count) }
-    private var canAdd: Bool { isEnabled && !isPreparing && remainingCount > 0 }
+    private var canAdd: Bool {
+        isEnabled && !isPreparing && !screenCapture.isActive && remainingCount > 0
+    }
 
     private func loadPhotoSelections(_ items: [VisionPhotoLibraryItem]) {
         let selected = Array(items.prefix(remainingCount))
@@ -170,19 +190,24 @@ struct VisionImageAttachmentPicker: View {
         }
     }
 
-    private func captureSharedContent() {
-        isPreparing = true
-        Task {
-            defer { isPreparing = false }
-            do {
-                let data = try await VisionScreenCapture.captureImageData()
-                try await append(data, ordinal: attachments.count + 1)
-            } catch VisionScreenCaptureError.cancelled {
-                return
-            } catch {
+    private func beginCapture(_ mode: VisionScreenCaptureController.Mode) {
+        screenCapture.begin(
+            mode: mode,
+            onCaptured: { data in
+                isPreparing = true
+                Task {
+                    defer { isPreparing = false }
+                    do {
+                        try await append(data, ordinal: attachments.count + 1)
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            },
+            onFailure: { error in
                 errorMessage = error.localizedDescription
             }
-        }
+        )
     }
 
     private func append(_ data: Data, ordinal: Int) async throws {
@@ -191,6 +216,56 @@ struct VisionImageAttachmentPicker: View {
         }.value
         guard attachments.count < 8 else { return }
         attachments.append(attachment)
+    }
+}
+
+private struct VisionScreenCaptureControls: View {
+    let controller: VisionScreenCaptureController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(controller.statusLabel, systemImage: statusIcon)
+                .font(.headline)
+
+            switch controller.phase {
+            case .ready(.window):
+                Text("Arrange or interact with the selected window, then take the frame you want.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Capture Now") { controller.captureNow() }
+                        .buttonStyle(.borderedProminent)
+                    Button("3 Seconds") { controller.captureAfter(seconds: 3) }
+                        .buttonStyle(.bordered)
+                }
+            case let .counting(mode, _):
+                Text(
+                    mode == .immersive
+                        ? "Return to the immersive app. T3 will stop sharing automatically."
+                        : "Keep the selected window in the state you want."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            case .capturing:
+                ProgressView()
+                    .controlSize(.small)
+            case .idle, .choosing, .preparing, .ready(.immersive):
+                EmptyView()
+            }
+
+            Button("Cancel", role: .destructive) { controller.cancel() }
+                .buttonStyle(.bordered)
+        }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private var statusIcon: String {
+        switch controller.phase {
+        case .counting: "timer"
+        case .capturing: "camera.fill"
+        default: "rectangle.dashed"
+        }
     }
 }
 

@@ -1,6 +1,8 @@
-import Foundation
+import AudioToolbox
 import CoreImage
 import CoreMedia
+import Foundation
+import Observation
 @preconcurrency import ScreenCaptureKit
 import UIKit
 
@@ -20,13 +22,192 @@ enum VisionScreenCaptureError: LocalizedError {
     }
 }
 
-enum VisionScreenCapture {
-    static var isSupported: Bool {
-        SCContentSharingPicker.shared.isAvailable
+@MainActor
+@Observable
+final class VisionScreenCaptureController {
+    enum Mode: Equatable {
+        case window
+        case immersive
+
+        var selectionStyle: SCShareableContentStyle {
+            switch self {
+            case .window: .window
+            case .immersive: .display
+            }
+        }
+
+        var readyLabel: String {
+            switch self {
+            case .window: "Window ready"
+            case .immersive: "Immersive view ready"
+            }
+        }
     }
 
-    static func captureImageData() async throws -> Data {
-        try await VisionScreenCaptureSession.capture()
+    enum Phase: Equatable {
+        case idle
+        case choosing(Mode)
+        case preparing(Mode)
+        case ready(Mode)
+        case counting(Mode, Int)
+        case capturing(Mode)
+    }
+
+    private(set) var phase = Phase.idle
+
+    @ObservationIgnored
+    private var session: VisionScreenCaptureSession?
+    @ObservationIgnored
+    private var countdownTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var onCaptured: ((Data) -> Void)?
+    @ObservationIgnored
+    private var onFailure: ((Error) -> Void)?
+
+    static var isSupported: Bool { SCContentSharingPicker.shared.isAvailable }
+
+    var isActive: Bool { phase != .idle }
+
+    var showsControls: Bool {
+        switch phase {
+        case .ready, .counting, .capturing: true
+        case .idle, .choosing, .preparing: false
+        }
+    }
+
+    var statusLabel: String {
+        switch phase {
+        case .idle: "Screen capture"
+        case let .choosing(mode):
+            mode == .window ? "Choose a window" : "Choose the full display"
+        case .preparing: "Starting capture…"
+        case let .ready(mode): mode.readyLabel
+        case let .counting(_, seconds): "Capturing in \(seconds)…"
+        case .capturing: "Capturing…"
+        }
+    }
+
+    func begin(
+        mode: Mode,
+        onCaptured: @escaping (Data) -> Void,
+        onFailure: @escaping (Error) -> Void
+    ) {
+        guard phase == .idle else { return }
+        guard Self.isSupported else {
+            onFailure(VisionScreenCaptureError.unavailable)
+            return
+        }
+
+        self.onCaptured = onCaptured
+        self.onFailure = onFailure
+        phase = .choosing(mode)
+
+        let session = VisionScreenCaptureSession(
+            mode: mode,
+            onPreparing: { [weak self] in
+                self?.phase = .preparing(mode)
+            },
+            onReady: { [weak self] in
+                guard let self else { return }
+                phase = .ready(mode)
+                if mode == .immersive {
+                    captureAfter(seconds: 5)
+                }
+            },
+            onCancelled: { [weak self] in
+                self?.reset()
+            },
+            onFailure: { [weak self] error in
+                guard let self else { return }
+                let callback = self.onFailure
+                reset()
+                callback?(error)
+            }
+        )
+        self.session = session
+        session.presentPicker()
+    }
+
+    func captureNow() {
+        guard let mode = activeMode, let session else { return }
+        countdownTask?.cancel()
+        countdownTask = nil
+        phase = .capturing(mode)
+
+        Task {
+            do {
+                let data = try await session.captureLatestFrame()
+                AudioServicesPlaySystemSound(1108)
+                let callback = onCaptured
+                reset()
+                callback?(data)
+            } catch is CancellationError {
+                reset()
+            } catch {
+                let callback = onFailure
+                reset()
+                callback?(error)
+            }
+        }
+    }
+
+    func captureAfter(seconds: Int) {
+        guard let mode = activeMode, session != nil else { return }
+        countdownTask?.cancel()
+        countdownTask = Task {
+            for remaining in stride(from: max(1, seconds), through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
+                phase = .counting(mode, remaining)
+                AudioServicesPlaySystemSound(1104)
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+            captureNow()
+        }
+    }
+
+    func cancel() {
+        let session = session
+        reset()
+        Task { await session?.cancel() }
+    }
+
+    private var activeMode: Mode? {
+        switch phase {
+        case let .choosing(mode), let .preparing(mode), let .ready(mode),
+             let .counting(mode, _), let .capturing(mode): mode
+        case .idle: nil
+        }
+    }
+
+    private func reset() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        session = nil
+        onCaptured = nil
+        onFailure = nil
+        phase = .idle
+    }
+}
+
+private final class VisionLatestFrameStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestFrame: CVPixelBuffer?
+    private var announcedFirstFrame = false
+
+    func store(_ frame: CVPixelBuffer) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        latestFrame = frame
+        guard !announcedFirstFrame else { return false }
+        announcedFirstFrame = true
+        return true
+    }
+
+    func current() -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latestFrame
     }
 }
 
@@ -36,27 +217,42 @@ private final class VisionScreenCaptureSession: NSObject,
     SCStreamDelegate,
     SCStreamOutput
 {
-    private static var activeSession: VisionScreenCaptureSession?
+    private static weak var activeSession: VisionScreenCaptureSession?
 
+    private let mode: VisionScreenCaptureController.Mode
+    private let onPreparing: () -> Void
+    private let onReady: () -> Void
+    private let onCancelled: () -> Void
+    private let onFailure: (Error) -> Void
     private let sampleQueue = DispatchQueue(label: "codes.t3.vision.screen-capture")
-    private let imageContext = CIContext(options: [.cacheIntermediates: false])
+    private let frames = VisionLatestFrameStore()
     private var stream: SCStream?
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var isFinished = false
+    private var isStopping = false
 
-    static func capture() async throws -> Data {
-        guard activeSession == nil, SCContentSharingPicker.shared.isAvailable else {
-            throw VisionScreenCaptureError.unavailable
+    init(
+        mode: VisionScreenCaptureController.Mode,
+        onPreparing: @escaping () -> Void,
+        onReady: @escaping () -> Void,
+        onCancelled: @escaping () -> Void,
+        onFailure: @escaping (Error) -> Void
+    ) {
+        self.mode = mode
+        self.onPreparing = onPreparing
+        self.onReady = onReady
+        self.onCancelled = onCancelled
+        self.onFailure = onFailure
+    }
+
+    func presentPicker() {
+        guard Self.activeSession == nil, SCContentSharingPicker.shared.isAvailable else {
+            onFailure(VisionScreenCaptureError.unavailable)
+            return
         }
-        let session = VisionScreenCaptureSession()
-        activeSession = session
-        return try await withCheckedThrowingContinuation { continuation in
-            session.continuation = continuation
-            let picker = SCContentSharingPicker.shared
-            picker.add(session)
-            picker.isActive = true
-            picker.present()
-        }
+        Self.activeSession = self
+        let picker = SCContentSharingPicker.shared
+        picker.add(self)
+        picker.isActive = true
+        picker.present(using: mode.selectionStyle)
     }
 
     nonisolated func contentSharingPicker(
@@ -71,15 +267,22 @@ private final class VisionScreenCaptureSession: NSObject,
         _ picker: SCContentSharingPicker,
         didCancelFor stream: SCStream?
     ) {
-        Task { @MainActor in finish(.failure(VisionScreenCaptureError.cancelled)) }
+        Task { @MainActor in
+            await stopStream()
+            onCancelled()
+        }
     }
 
     nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {
-        Task { @MainActor in finish(.failure(error)) }
+        Task { @MainActor in
+            await stopStream()
+            onFailure(error)
+        }
     }
 
     private func startStream(filter: SCContentFilter) async {
         do {
+            onPreparing()
             let configuration = SCStreamConfiguration()
             configuration.capturesAudio = false
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
@@ -87,7 +290,8 @@ private final class VisionScreenCaptureSession: NSObject,
             self.stream = stream
             try await stream.startCapture()
         } catch {
-            finish(.failure(error))
+            await stopStream()
+            onFailure(error)
         }
     }
 
@@ -99,36 +303,50 @@ private final class VisionScreenCaptureSession: NSObject,
         guard type == .screen,
               sampleBuffer.isValid,
               let pixelBuffer = sampleBuffer.imageBuffer else { return }
-        Task { @MainActor in
-            guard !isFinished else { return }
-            let image = CIImage(cvPixelBuffer: pixelBuffer)
-            guard let cgImage = imageContext.createCGImage(image, from: image.extent),
-                  let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.94) else {
-                finish(.failure(VisionScreenCaptureError.encodingFailed))
-                return
-            }
-            finish(.success(data))
+        if frames.store(pixelBuffer) {
+            Task { @MainActor in onReady() }
         }
     }
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
-        Task { @MainActor in finish(.failure(error)) }
+        Task { @MainActor in
+            guard !isStopping else { return }
+            await stopStream()
+            onFailure(error)
+        }
     }
 
-    private func finish(_ result: Result<Data, Error>) {
-        guard !isFinished else { return }
-        isFinished = true
-        let continuation = continuation
-        self.continuation = nil
-        let stream = stream
-        self.stream = nil
+    func captureLatestFrame() async throws -> Data {
+        guard let pixelBuffer = frames.current() else {
+            await stopStream()
+            throw VisionScreenCaptureError.noFrame
+        }
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext(options: [.cacheIntermediates: false])
+        guard let cgImage = context.createCGImage(image, from: image.extent),
+              let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.94) else {
+            await stopStream()
+            throw VisionScreenCaptureError.encodingFailed
+        }
+        await stopStream()
+        return data
+    }
+
+    func cancel() async {
+        await stopStream()
+    }
+
+    private func stopStream() async {
+        guard !isStopping else { return }
+        isStopping = true
         let picker = SCContentSharingPicker.shared
         picker.remove(self)
         picker.isActive = false
-        Self.activeSession = nil
-        Task {
-            try? await stream?.stopCapture()
-            continuation?.resume(with: result)
+        let stream = stream
+        self.stream = nil
+        try? await stream?.stopCapture()
+        if Self.activeSession === self {
+            Self.activeSession = nil
         }
     }
 }
