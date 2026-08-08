@@ -78,8 +78,9 @@ final class SpeechLabRecorder {
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
     private var isRecording = false
+    private var onBufferCaptured: (@Sendable () -> Void)?
 
-    func start() throws {
+    func start(onBufferCaptured: (@Sendable () -> Void)? = nil) throws {
         guard !isRecording else { return }
 
         let session = AVAudioSession.sharedInstance()
@@ -109,6 +110,7 @@ final class SpeechLabRecorder {
 
         self.targetFormat = targetFormat
         self.converter = converter
+        self.onBufferCaptured = onBufferCaptured
         sampleStore.reset()
 
         input.removeTap(onBus: 0)
@@ -128,6 +130,7 @@ final class SpeechLabRecorder {
             input.removeTap(onBus: 0)
             self.converter = nil
             self.targetFormat = nil
+            self.onBufferCaptured = nil
             try? session.setActive(false, options: [.notifyOthersOnDeactivation])
             throw error
         }
@@ -152,10 +155,15 @@ final class SpeechLabRecorder {
         sampleStore.reset()
     }
 
+    func snapshotSamples() -> [Float] {
+        sampleStore.snapshot()
+    }
+
     private func capture(_ buffer: AVAudioPCMBuffer) {
         guard let converter, let targetFormat else { return }
         if buffer.format == targetFormat {
             sampleStore.append(buffer)
+            onBufferCaptured?()
             return
         }
 
@@ -182,6 +190,7 @@ final class SpeechLabRecorder {
         }
         guard conversionError == nil, output.frameLength > 0 else { return }
         sampleStore.append(output)
+        onBufferCaptured?()
     }
 
     private func stopCapture() {
@@ -190,6 +199,7 @@ final class SpeechLabRecorder {
         audioEngine.inputNode.removeTap(onBus: 0)
         converter = nil
         targetFormat = nil
+        onBufferCaptured = nil
         isRecording = false
         try? AVAudioSession.sharedInstance().setActive(
             false,

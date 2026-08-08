@@ -68,13 +68,28 @@ private final class VisionWhisperKitPipeline {
         let whisperKit = try await preparedWhisperKit(onState: { _ in })
         let results = try await whisperKit.transcribe(
             audioPath: audioURL.path,
-            decodeOptions: DecodingOptions(
-                language: nil,
-                temperature: 0,
-                detectLanguage: true,
-                withoutTimestamps: true
-            )
+            decodeOptions: Self.decodingOptions
         )
+        return Self.joinedText(from: results)
+    }
+
+    func transcribe(audioSamples: [Float]) async throws -> String {
+        let whisperKit = try await preparedWhisperKit(onState: { _ in })
+        let results = try await whisperKit.transcribe(
+            audioArray: audioSamples,
+            decodeOptions: Self.decodingOptions
+        )
+        return Self.joinedText(from: results)
+    }
+
+    private static let decodingOptions = DecodingOptions(
+        language: nil,
+        temperature: 0,
+        detectLanguage: true,
+        withoutTimestamps: true
+    )
+
+    private static func joinedText(from results: [TranscriptionResult]) -> String {
         return results
             .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -158,15 +173,22 @@ private final class VisionWhisperKitPipeline {
     }
 }
 
-/// Records one utterance and transcribes it locally with WhisperKit. WhisperKit
-/// is batch-based, so text is committed after the user stops recording.
+/// Records one utterance and transcribes it locally with WhisperKit. Partial
+/// passes update the HUD; one final full-buffer pass commits text on stop.
 @MainActor
 final class VisionDictationController {
+    private static let liveUpdateSampleInterval = 24_000
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
+        category: "Dictation"
+    )
+
     private let recorder = SpeechLabRecorder()
     private var isRunning = false
+    private var liveTranscriptionTask: Task<Void, Never>?
+    private var bufferContinuation: AsyncStream<Void>.Continuation?
 
-    // Kept as part of the controller contract even though batch transcription
-    // does not emit volatile phrases.
+    // Partial text is presentation-only; the full-buffer pass is finalized.
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
     var onError: (@MainActor @Sendable (String) -> Void)?
@@ -191,16 +213,41 @@ final class VisionDictationController {
             self?.onPreparationState?(state)
         }
         try Task.checkCancellation()
-        try recorder.start()
+
+        let (bufferSignals, continuation) = AsyncStream.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        do {
+            try recorder.start {
+                continuation.yield(())
+            }
+        } catch {
+            continuation.finish()
+            throw error
+        }
+        bufferContinuation = continuation
         isRunning = true
+        liveTranscriptionTask = Task { [weak self] in
+            await self?.transcribeLiveUpdates(from: bufferSignals)
+        }
     }
 
     func finish() async {
         guard isRunning else { return }
         isRunning = false
+        let recording: SpeechLabRecording
         do {
-            let recording = try recorder.stop()
-            defer { try? FileManager.default.removeItem(at: recording.fileURL) }
+            recording = try recorder.stop()
+        } catch {
+            await stopLiveUpdates()
+            onError?(error.localizedDescription)
+            return
+        }
+
+        await stopLiveUpdates()
+        defer { try? FileManager.default.removeItem(at: recording.fileURL) }
+        do {
             let text = try await VisionWhisperKitPipeline.shared.transcribe(
                 audioURL: recording.fileURL
             )
@@ -215,5 +262,42 @@ final class VisionDictationController {
     func cancel() async {
         if isRunning { recorder.cancel() }
         isRunning = false
+        await stopLiveUpdates()
+    }
+
+    private func stopLiveUpdates() async {
+        bufferContinuation?.finish()
+        bufferContinuation = nil
+        liveTranscriptionTask?.cancel()
+        await liveTranscriptionTask?.value
+        liveTranscriptionTask = nil
+    }
+
+    private func transcribeLiveUpdates(from signals: AsyncStream<Void>) async {
+        var lastTranscribedSampleCount = 0
+        for await _ in signals {
+            guard !Task.isCancelled, isRunning else { return }
+            let samples = recorder.snapshotSamples()
+            guard samples.count >= Self.liveUpdateSampleInterval,
+                  samples.count - lastTranscribedSampleCount
+                    >= Self.liveUpdateSampleInterval else { continue }
+            lastTranscribedSampleCount = samples.count
+
+            do {
+                let text = try await VisionWhisperKitPipeline.shared.transcribe(
+                    audioSamples: samples
+                )
+                guard !Task.isCancelled, isRunning else { return }
+                onVolatile?(text)
+            } catch is CancellationError {
+                return
+            } catch {
+                // A partial pass should not discard the recording. The final
+                // pass after stop can still succeed and report a useful error.
+                Self.logger.error(
+                    "Live transcription update failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 }

@@ -262,9 +262,10 @@ dependent, so a timed mid-tool integration test is still required.
 
 T3 Vision uses WhisperKit with the compressed Large v3 Turbo model. The model
 is downloaded into the device cache once, prepared on first use after launch,
-and retained in memory for later dictation during that app session. WhisperKit
-is batch-based: recording begins only after preparation finishes, and the final
-transcript commits into the draft after the user stops recording.
+and retained in memory for later dictation during that app session. Recording
+begins only after preparation finishes. Throttled partial passes update the
+dictation HUD while the user speaks; a final full-buffer pass commits the most
+accurate transcript into the draft after the user stops recording.
 
 Cancel rolls back only if the draft still ends with exactly what dictation
 appended, so a mid-dictation edit is never eaten. The composer continues to
