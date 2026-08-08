@@ -193,8 +193,12 @@ exactly match the dictated suffix. Task ordering is local to each paired Vision
 client because the server has no thread-order command.
 
 The client now targets visionOS 27 and requires Xcode 27 so its ScreenCaptureKit
-shared-content picker compiles directly, without a visionOS 26 fallback. The
-earlier visionOS 26 implementation passed a device build and was installed and
+shared-content picker compiles directly, without a visionOS 26 fallback. Image
+attachments support Photos, Files, explicit window capture, and an audible
+five-second full-display capture that continues while an immersive app hides T3
+Vision. Window capture stays armed until the user chooses Capture Now or a
+three-second countdown; stopping sharing cancels instead of attaching a frame.
+The earlier visionOS 26 implementation passed a device build and was installed and
 launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
 most recently at product commit `ab7f87a7`.
 It still needs a hands-on interaction pass, especially for the Speech framework
