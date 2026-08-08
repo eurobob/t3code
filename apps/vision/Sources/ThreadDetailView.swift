@@ -242,7 +242,10 @@ final class ThreadDetailModel {
         guard let thread,
               thread.messages.contains(where: {
                   $0.role == "user"
-                      && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && (
+                          !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || $0.attachments?.isEmpty == false
+                      )
               }) else { return nil }
         let latestMessage = thread.messages.last.map {
             "\($0.id):\($0.updatedAt):\($0.text.count):\($0.streaming)"
