@@ -151,17 +151,17 @@ output from a compact header error control instead of presenting a modal sheet.
 The terminal subscription is established before the command is written, so
 immediate guard failures are not lost.
 
-Task detail opens to a concise, AI-generated Summary that puts unresolved
+Task detail opens to the full Conversation. A global Summary control opens a
+concise AI brief as a trailing third panel and keeps that choice while switching
+tasks. Opening the panel requests a wider visionOS window so the task sidebar,
+conversation, and summary retain readable widths. The brief puts unresolved
 decisions first, then shows "What you asked", "What was done", and latest
 checkpoint file changes. Generation runs on the T3 server through its configured
 text-generation model (including Claude Sonnet when selected), and the Vision
 client caches the result per environment/task revision. It refreshes after the
 task changes, waits for active turns to settle, and offers manual regeneration.
 Exact unresolved approval/input state remains deterministic so an AI summary
-cannot hide a required response. The summary remains the primary task surface;
-the full conversation opens beside it as a trailing third panel. That panel's
-open state is persisted per task, and its control lives inside the summary so it
-does not compete with global task actions such as Deploy.
+cannot hide a required response.
 
 Sending while a turn is starting or running always steers: interrupt, observe
 the old turn become terminal on the thread stream (normally `interrupted`, or

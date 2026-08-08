@@ -566,14 +566,23 @@ public actor WebSocketRPCClient {
                 if exit._tag == "Success" {
                     completeUnary(requestID, with: .success(exit.value ?? .null))
                 } else {
-                    completeUnary(requestID, with: .failure(remoteError(exit)))
+                    completeUnary(
+                        requestID,
+                        with: .failure(
+                            remoteError(exit, method: unary[requestID]?.envelope.tag)
+                        )
+                    )
                 }
                 return
             }
             guard let subscriptionID = subscriptionByRequestID.removeValue(forKey: requestID),
                   let subscription = subscriptions.removeValue(forKey: subscriptionID)
             else { return }
-            subscription.finish(exit._tag == "Success" ? nil : remoteError(exit))
+            subscription.finish(
+                exit._tag == "Success"
+                    ? nil
+                    : remoteError(exit, method: subscription.tag)
+            )
         case "Defect", "ClientProtocolError":
             throw RPCError.remote(
                 response.defect?.stringValue ?? "The server reported an RPC protocol error."
@@ -772,12 +781,39 @@ public actor WebSocketRPCClient {
         request.resume(result)
     }
 
-    private func remoteError(_ exit: RPCResponseEnvelope.Exit) -> RPCError {
+    private func remoteError(
+        _ exit: RPCResponseEnvelope.Exit,
+        method: String?
+    ) -> RPCError {
         let value = exit.cause?.first?.error
         let message = value?["message"]?.stringValue
             ?? value?["detail"]?.stringValue
+            ?? exit.cause?.compactMap { readableRemoteValue($0.defect) }.first
             ?? "The environment rejected the RPC request."
+        if message.hasPrefix("Unknown request tag:"), let method {
+            return .remote(
+                "This environment is running an older T3 server that does not support \(method). "
+                    + "Update and restart the environment, then try again."
+            )
+        }
         return .remote(message)
+    }
+
+    private func readableRemoteValue(_ value: JSONValue?) -> String? {
+        guard let value else { return nil }
+        switch value {
+        case let .string(message):
+            return message
+        case let .object(fields):
+            for key in ["message", "detail", "error", "cause"] {
+                if let message = readableRemoteValue(fields[key]) { return message }
+            }
+            return fields.values.lazy.compactMap(readableRemoteValue).first
+        case let .array(values):
+            return values.lazy.compactMap(readableRemoteValue).first
+        case .null, .bool, .integer, .unsignedInteger, .number:
+            return nil
+        }
     }
 
     private func allocateRequestID() -> Int {

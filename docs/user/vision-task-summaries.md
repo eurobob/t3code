@@ -1,6 +1,8 @@
 # AI task summaries in T3 Vision
 
-T3 Vision opens each task in Summary view. The brief answers three questions:
+T3 Vision opens each task in Conversation view. Turn on the global **Show
+Summary** control to open an AI brief beside the conversation. The brief answers
+three questions:
 
 - What did you ask for?
 - What was done?
@@ -17,7 +19,7 @@ button to regenerate one manually. While a turn is running, the previous brief
 remains visible and exact approval or input requests continue to come from live
 task state.
 
-Use **Open conversation** in the task brief to show the full chat beside the
-summary as a third panel. Close it to return to the focused summary. T3 Vision
-remembers the panel state separately for each task; new tasks open with the
-summary only.
+The summary setting applies across the task workspace rather than to one task.
+When enabled, switching tasks keeps the summary panel open and refreshes it for
+the selected conversation. Opening the panel also widens the visionOS window so
+the task sidebar, conversation, and summary retain comfortable reading widths.

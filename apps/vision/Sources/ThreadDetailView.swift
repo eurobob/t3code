@@ -1017,9 +1017,8 @@ struct ThreadDetailView: View {
     }
 
     @SwiftUI.Environment(AppModel.self) private var appModel
-    private let conversationPanelDefaultsKey: String
+    @AppStorage("vision.tasks.showsSummaryPanel") private var showsSummaryPanel = false
     @State private var model: ThreadDetailModel
-    @State private var showsConversationPanel: Bool
     @State private var draftEditorMode = DraftEditorMode.hidden
     @State private var prefersHardwareEditor = false
     @State private var dictationBaseline = ""
@@ -1030,14 +1029,7 @@ struct ThreadDetailView: View {
     @State private var showsDeployError = false
 
     init(threadID: String) {
-        let conversationPanelDefaultsKey = "codes.t3.vision.conversation-panel.\(threadID)"
-        let legacyDetailModeKey = "codes.t3.vision.task-detail-mode.\(threadID)"
-        self.conversationPanelDefaultsKey = conversationPanelDefaultsKey
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
-        _showsConversationPanel = State(
-            initialValue: UserDefaults.standard.object(forKey: conversationPanelDefaultsKey) as? Bool
-                ?? (UserDefaults.standard.string(forKey: legacyDetailModeKey) == "chat")
-        )
     }
 
     var body: some View {
@@ -1069,9 +1061,6 @@ struct ThreadDetailView: View {
         .onChange(of: model.draftRestorationRevision) {
             draftEditorMode = prefersHardwareEditor ? .hardwareKeyboard : .softwareKeyboard
         }
-        .onChange(of: showsConversationPanel) {
-            UserDefaults.standard.set(showsConversationPanel, forKey: conversationPanelDefaultsKey)
-        }
         .onDisappear { model.stop() }
     }
 
@@ -1082,43 +1071,46 @@ struct ThreadDetailView: View {
 
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    taskSummary
-
-                    if !showsConversationPanel {
-                        Divider()
-                        voiceDock
-                    }
+                    chatTranscript
+                    Divider()
+                    voiceDock
                 }
-                .frame(minWidth: 480, idealWidth: 680, maxWidth: .infinity)
+                .frame(minWidth: 520, idealWidth: 720, maxWidth: .infinity)
 
-                if showsConversationPanel {
+                if showsSummaryPanel {
                     Divider()
                     VStack(spacing: 0) {
-                        conversationPanelHeader
+                        summaryPanelHeader
                         Divider()
-                        chatTranscript
-                        Divider()
-                        voiceDock
+                        taskSummary
                     }
-                    .frame(minWidth: 420, idealWidth: 520, maxWidth: 620)
+                    .frame(minWidth: 480, idealWidth: 560, maxWidth: 680)
                 }
             }
         }
+        .background {
+            VisionWindowWidthController(
+                isExpanded: showsSummaryPanel,
+                expandedWidth: 1_480
+            )
+            .frame(width: 0, height: 0)
+        }
+        .frame(minWidth: showsSummaryPanel ? 1_180 : 520)
     }
 
-    private var conversationPanelHeader: some View {
+    private var summaryPanelHeader: some View {
         HStack(spacing: 10) {
-            Label("Conversation", systemImage: "bubble.left.and.bubble.right")
+            Label("Task summary", systemImage: "sparkles")
                 .font(.headline)
             Spacer()
             Button {
-                showsConversationPanel = false
+                showsSummaryPanel = false
             } label: {
-                Label("Close conversation", systemImage: "xmark")
+                Label("Close summary", systemImage: "xmark")
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Returns to the focused task summary")
+            .accessibilityHint("Closes the summary panel and keeps the conversation open")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -1233,7 +1225,7 @@ struct ThreadDetailView: View {
 
                         ForEach(pendingAttention) { item in
                             TaskAttentionCard(item: item) {
-                                showsConversationPanel = true
+                                showsSummaryPanel = false
                             }
                         }
 
@@ -1323,16 +1315,6 @@ struct ThreadDetailView: View {
 
             Spacer()
 
-            if !showsConversationPanel {
-                Button {
-                    showsConversationPanel = true
-                } label: {
-                    Label("Open conversation", systemImage: "rectangle.righthalf.inset.filled")
-                }
-                .buttonStyle(.bordered)
-                .accessibilityHint("Opens the full conversation beside this summary")
-            }
-
             Button {
                 Task { await model.ensureTaskSummary(using: appModel, force: true) }
             } label: {
@@ -1396,6 +1378,20 @@ struct ThreadDetailView: View {
                 }
             }
             Spacer()
+            Button {
+                showsSummaryPanel.toggle()
+            } label: {
+                Label(
+                    showsSummaryPanel ? "Hide Summary" : "Show Summary",
+                    systemImage: "sparkles"
+                )
+            }
+            .buttonStyle(.bordered)
+            .accessibilityHint(
+                showsSummaryPanel
+                    ? "Closes the global task summary panel"
+                    : "Opens the global task summary panel beside the conversation"
+            )
             if model.isTurnRunning {
                 Button(role: .destructive) {
                     model.interrupt(using: appModel)
