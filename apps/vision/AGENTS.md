@@ -36,11 +36,14 @@ Security, which is why it ports to visionOS unmodified.
 
 The canonical integration branch for this client is `visionos` on the
 `eurobob/t3code` fork. Start feature branches from the latest `origin/visionos`,
-then merge completed work back into `visionos` and push it to that fork before
-handoff unless the user explicitly asks to keep the work separate. Do not leave
-finished Vision work only on a ticket-specific branch, and do not use upstream
-`main` as the Vision integration target. Fetch immediately before integration
-so concurrent Vision work is preserved rather than replaced.
+using a separate worktree, and keep the work there for user testing and
+validation. The `visionos` branch is the eventual integration destination, not
+an automatic handoff step. **Never merge into or push `visionos` without the
+user's explicit approval after they have validated the feature.** A request to
+branch from `visionos`, implement the feature, commit it, or prepare it for
+testing does not grant that approval. Do not use upstream `main` as the Vision
+integration target. Once the user authorizes integration, fetch immediately
+before merging so concurrent Vision work is preserved rather than replaced.
 
 ## Building
 
