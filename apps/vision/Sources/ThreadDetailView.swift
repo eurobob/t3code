@@ -4,10 +4,9 @@ import SwiftUI
 import UIKit
 
 struct VisionTaskBrief: Codable, Equatable {
-    let asked: [String]
-    let decisions: [String]
+    let ticket: String
+    let latest: String
     let done: [String]
-    let nextActions: [String]
     let needsYou: [String]
     let modelSelection: ModelSelection
     let generatedAt: String
@@ -23,10 +22,9 @@ final class ThreadDetailModel {
 
     private struct ClaudeSummaryEnvelope: Decodable {
         struct Payload: Codable {
-            let asked: [String]
-            let decisions: [String]
+            let ticket: String
+            let latest: String
             let done: [String]
-            let nextActions: [String]
             let needsYou: [String]
         }
 
@@ -412,7 +410,7 @@ final class ThreadDetailModel {
                   $0.id == thread.projectId
               }) else { throw SummaryFallbackError.threadUnavailable }
 
-        let schema = #"{"type":"object","properties":{"asked":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":3},"decisions":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":4},"done":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":4},"nextActions":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3},"needsYou":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3}},"required":["asked","decisions","done","nextActions","needsYou"],"additionalProperties":false}"#
+        let schema = #"{"type":"object","properties":{"ticket":{"type":"string","maxLength":160},"latest":{"type":"string","maxLength":160},"done":{"type":"array","items":{"type":"string","maxLength":120},"minItems":1,"maxItems":3},"needsYou":{"type":"array","items":{"type":"string","maxLength":120},"maxItems":3}},"required":["ticket","latest","done","needsYou"],"additionalProperties":false}"#
         var rejectedDraft: ClaudeSummaryEnvelope.Payload?
 
         for _ in 0..<2 {
@@ -468,18 +466,16 @@ final class ThreadDetailModel {
     private func validatedTaskSummary(
         _ payload: ClaudeSummaryEnvelope.Payload
     ) -> VisionTaskBrief? {
-        let asked = normalizedSummaryItems(payload.asked, limit: 3)
-        let decisions = normalizedSummaryItems(payload.decisions, limit: 4)
-        let done = normalizedSummaryItems(payload.done, limit: 4)
-        let nextActions = normalizedSummaryItems(payload.nextActions, limit: 3)
+        let ticket = normalizedSummaryItem(payload.ticket)
+        let latest = normalizedSummaryItem(payload.latest)
+        let done = normalizedSummaryItems(payload.done, limit: 3)
         let needsYou = normalizedSummaryItems(payload.needsYou, limit: 3)
-        let normalizedAsked = asked.map(normalizedSummaryField)
-        let normalizedDecisions = decisions.map(normalizedSummaryField)
+        let normalizedTicket = normalizedSummaryField(ticket)
+        let normalizedLatest = normalizedSummaryField(latest)
         let normalizedDone = done.map(normalizedSummaryField)
-        let normalizedNextActions = nextActions.map(normalizedSummaryField)
         let normalizedNeedsYou = needsYou.map(normalizedSummaryField)
-        let allCategorizedItems = normalizedAsked + normalizedDecisions + normalizedDone
-            + normalizedNextActions + normalizedNeedsYou
+        let allCategorizedItems = [normalizedTicket, normalizedLatest]
+            + normalizedDone + normalizedNeedsYou
         let placeholders: Set<String> = ["test", "testing", "none", "unknown", "n a", "na", "todo", "tbd"]
         let processNarration = [
             "agent is working on this now",
@@ -487,25 +483,23 @@ final class ThreadDetailModel {
             "currently working on this",
         ]
 
-        guard !asked.isEmpty,
+        guard !ticket.isEmpty,
+              !latest.isEmpty,
               !done.isEmpty,
-              asked.allSatisfy({ $0.count <= 120 }),
-              decisions.allSatisfy({ $0.count <= 120 }),
+              ticket.count <= 160,
+              latest.count <= 160,
               done.allSatisfy({ $0.count <= 120 }),
-              nextActions.allSatisfy({ $0.count <= 120 }),
               needsYou.allSatisfy({ $0.count <= 120 }),
               allCategorizedItems.allSatisfy({ !placeholders.contains($0) }),
               Set(allCategorizedItems).count == allCategorizedItems.count,
-              Set(normalizedAsked).isDisjoint(with: Set(normalizedDone)),
               !processNarration.contains(where: { phrase in
                   normalizedDone.contains(where: { $0.contains(phrase) })
               }) else { return nil }
 
         return VisionTaskBrief(
-            asked: asked,
-            decisions: decisions,
+            ticket: ticket,
+            latest: latest,
             done: done,
-            nextActions: nextActions,
             needsYou: needsYou,
             modelSelection: ModelSelection(instanceId: "claude", model: "sonnet"),
             generatedAt: ISO8601DateFormatter().string(from: Date())
@@ -513,13 +507,14 @@ final class ThreadDetailModel {
     }
 
     private func normalizedSummaryItems(_ items: [String], limit: Int) -> [String] {
-        items.prefix(limit).compactMap { item in
-            let normalized = item
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: #"^[•\-*]\s*"#, with: "", options: .regularExpression)
-            return normalized.isEmpty ? nil : normalized
-        }
+        items.prefix(limit).map(normalizedSummaryItem).filter { !$0.isEmpty }
+    }
+
+    private func normalizedSummaryItem(_ item: String) -> String {
+        item
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^[•\-*]\s*"#, with: "", options: .regularExpression)
     }
 
     private func normalizedSummaryField(_ value: String) -> String {
@@ -641,31 +636,26 @@ final class ThreadDetailModel {
         var sections = [
             "Project: \(projectTitle)",
             "Task: \(thread.title)",
-            "Write a glanceable task brief grounded only in the supplied history. Return arrays "
-                + "of short scan lines, not paragraphs. Use plain language and front-load the "
-                + "important noun or outcome. Each line must express one idea in at most 120 "
-                + "characters. Sentence fragments are fine. No headings or bullet characters; "
-                    + "the interface adds them. 'asked': 1-3 lines stating the user's current desired "
-                    + "end state and key constraints, incorporating later corrections. 'decisions': "
-                    + "up to 4 durable choices or constraints agreed in the task; do not repeat the "
-                    + "request. 'done': 1-4 "
-                + "lines naming only concrete outcomes already completed or verified. Omit the "
-                + "implementation diary, chronology, file-by-file details, and process narration. "
-                + "Treat the latest user correction as authoritative: if it reports that an "
-                + "earlier fix still fails, do not describe that fix as successful. Do not treat "
-                + "commit titles or an agent's claim of completion as verification. "
-                    + "'nextActions': up to 3 concrete remaining steps the agent can take. "
-                    + "'needsYou': at most 3 "
-                    + "specific decisions or actions actually required from the user; use an empty "
-                    + "array when none are required. For a vague or test-only request, say briefly "
-                    + "that no actionable task was specified and no substantive work was done. Never "
-                    + "repeat the same fact across categories. Never invent results.",
+            "Write a return-to-ticket brief for someone who has not seen this task in a week. "
+                + "Optimize for understanding in seconds, not completeness. Plain language; no "
+                + "paragraphs, headings, or implementation diary. 'ticket': one line, at most 160 "
+                + "characters, explaining what this ticket is trying to achieve. 'latest': one "
+                + "line, at most 160 characters, stating the most recent meaningful result, finding, "
+                + "blocker, or correction—never generic 'working on it' status. 'done': at most 3 "
+                + "short lines naming concrete outcomes already completed or verified. 'needsYou': "
+                + "at most 3 decisions or actions the user must take now; combine decisions and "
+                + "actions here and return an empty array when none are required. Never ask the "
+                + "user to confirm a choice they already stated. Treat the latest user correction "
+                + "as authoritative. If the user rejects or criticizes an earlier result, do not "
+                + "list that result as done. Commit titles and agent completion claims are not "
+                + "verification. Do not "
+                + "repeat facts across fields, include file inventories, or invent results.",
         ]
         if let rejectedDraft {
             sections.append(
                 "A previous draft was rejected as placeholder or duplicated content. Replace it "
-                    + "with terse, distinct scan lines. Rejected asked: "
-                    + "\(rejectedDraft.asked.joined(separator: " | "))\nRejected done: "
+                    + "with terse, distinct content. Rejected ticket: \(rejectedDraft.ticket)\n"
+                    + "Rejected latest: \(rejectedDraft.latest)\nRejected done: "
                     + rejectedDraft.done.joined(separator: " | ")
             )
         }
@@ -689,7 +679,7 @@ final class ThreadDetailModel {
     }
 
     private func taskSummaryCacheKey(environmentID: String?) -> String {
-        "codes.t3.vision.task-summary.v4.\(environmentID ?? "unknown").\(threadID)"
+        "codes.t3.vision.task-summary.v5.\(environmentID ?? "unknown").\(threadID)"
     }
 
     func submit(using appModel: AppModel) {
@@ -1586,30 +1576,18 @@ struct ThreadDetailView: View {
                             TaskSummaryActionCard(action: action)
                         }
                     }
+                } else {
+                    Label("Nothing needs you", systemImage: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                TaskBriefCard(
-                    title: "What you asked",
-                    icon: "text.bubble",
-                    items: model.visibleGeneratedSummary?.asked ?? originalRequest.map { [$0] },
-                    emptyText: model.summaryIsLoading
-                        ? "Generating an AI brief…"
-                        : "The task request has not arrived yet.",
-                    isWorking: false,
-                    files: []
+                TaskAtAGlanceCard(
+                    ticket: model.visibleGeneratedSummary?.ticket ?? fallbackTicketSummary,
+                    latest: model.visibleGeneratedSummary?.latest ?? fallbackLatestSummary,
+                    isLoading: model.summaryIsLoading
                 )
-
-                if let decisions = model.visibleGeneratedSummary?.decisions,
-                   !decisions.isEmpty {
-                    TaskBriefCard(
-                        title: "Key decisions",
-                        icon: "signpost.right.and.left",
-                        items: decisions,
-                        emptyText: "",
-                        isWorking: false,
-                        files: []
-                    )
-                }
 
                 TaskBriefCard(
                     title: "What was done",
@@ -1617,37 +1595,10 @@ struct ThreadDetailView: View {
                     items: model.visibleGeneratedSummary?.done ?? latestResult.map { [$0] },
                     emptyText: model.summaryIsLoading
                         ? "Reading the task history…"
-                        : (model.isAgentWorking
-                            ? "The agent is working on this now."
-                            : "The agent has not returned a result yet."),
+                        : "No completed outcome has been recorded yet.",
                     isWorking: model.isAgentWorking,
-                    files: latestCheckpointFiles
+                    files: []
                 )
-
-                if let nextActions = model.visibleGeneratedSummary?.nextActions,
-                   !nextActions.isEmpty {
-                    TaskBriefCard(
-                        title: "Next actions",
-                        icon: "arrow.right.circle",
-                        items: nextActions,
-                        emptyText: "",
-                        isWorking: false,
-                        files: []
-                    )
-                }
-
-                if pendingAttention.isEmpty && generatedActions.isEmpty {
-                    Label(
-                        model.isAgentWorking
-                            ? "Nothing needs your input while the agent works."
-                            : "No decision or action is waiting on you.",
-                        systemImage: "checkmark.circle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 4)
-                }
             }
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
@@ -1682,7 +1633,7 @@ struct ThreadDetailView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else if model.summaryIsLoading {
-                    Text("Using the text-generation model configured on the server")
+                    Text("Summarizing with Claude Sonnet")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -2052,15 +2003,20 @@ struct ThreadDetailView: View {
         return entries
     }
 
-    private var originalRequest: String? {
+    private var fallbackTicketSummary: String? {
         let requests = model.thread?.messages.filter {
             $0.role == "user"
                 && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } ?? []
         guard let original = requests.first else { return nil }
-        let originalText = conciseText(original.text, limit: 800)
-        guard let latest = requests.last, latest.id != original.id else { return originalText }
-        return "\(originalText)\n\nLatest direction\n\(conciseText(latest.text, limit: 400))"
+        return conciseText(original.text, limit: 180)
+    }
+
+    private var fallbackLatestSummary: String? {
+        if let latestResult {
+            return conciseText(latestResult, limit: 180)
+        }
+        return model.isAgentWorking ? "A new update is in progress." : nil
     }
 
     private var latestResult: String? {
@@ -2068,15 +2024,6 @@ struct ThreadDetailView: View {
             $0.role == "assistant"
                 && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }).map { conciseText($0.text) }
-    }
-
-    private var latestCheckpointFiles: [CheckpointFile] {
-        guard let checkpoints = model.thread?.checkpoints else { return [] }
-        if let latestTurnID = model.thread?.latestTurn?.turnId,
-           let checkpoint = checkpoints.last(where: { $0.turnId == latestTurnID }) {
-            return checkpoint.files
-        }
-        return checkpoints.last?.files ?? []
     }
 
     private var attentionItems: [TaskAttentionItem] {
@@ -2506,6 +2453,44 @@ private struct ActivityRow: View {
         }
         return activity.payload["detail"]?.stringValue
             ?? activity.payload["message"]?.stringValue
+    }
+}
+
+private struct TaskAtAGlanceCard: View {
+    let ticket: String?
+    let latest: String?
+    let isLoading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("At a glance", systemImage: "scope")
+                .font(.headline)
+
+            glanceRow(label: "Ticket", text: ticket ?? ticketPlaceholder)
+            Divider()
+            glanceRow(label: "Latest", text: latest ?? latestPlaceholder)
+        }
+        .padding(16)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func glanceRow(label: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var ticketPlaceholder: String {
+        isLoading ? "Summarizing the ticket…" : "No ticket request is available."
+    }
+
+    private var latestPlaceholder: String {
+        isLoading ? "Finding the latest meaningful update…" : "No update has been recorded yet."
     }
 }
 

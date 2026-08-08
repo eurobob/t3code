@@ -162,12 +162,14 @@ Sonnet request through the environment's existing terminal transport; it does
 not add a visible task turn, depend on the server's configured utility model, or
 require a new server RPC. Identical, placeholder, and progress-only results are
 rejected and regenerated once instead of being shown. The Vision client caches
-validated results per environment/task revision. The brief separates the
-current ask, key decisions, completed outcomes, agent-owned next actions, and
-user-owned actions. Each category uses strictly bounded, one-idea scan lines
-rendered as bullets rather than prose paragraphs; empty optional categories are
-hidden. It generates a stable snapshot while a turn is active, refreshes after
-that turn settles, and offers manual regeneration.
+validated results per environment/task revision. Its information hierarchy is
+return-to-ticket oriented: required user decisions/actions appear first, a
+two-line "At a glance" card identifies the ticket and latest meaningful update,
+and up to three completed outcomes provide secondary memory-refresh context.
+Decisions and actions are not separate categories, optional user input is hidden
+when absent, and file inventories are omitted. It generates a stable snapshot
+while a turn is active, refreshes after that turn settles, and offers manual
+regeneration.
 Exact unresolved approval/input state remains deterministic so an AI summary
 cannot hide a required response.
 
