@@ -267,11 +267,13 @@ first, then compressed Large v3 (about 626 MB). The record control is never
 gated on either model.
 
 The same 16 kHz microphone buffer feeds every tier. System results remain the
-fallback for the whole utterance. Once a WhisperKit tier returns a successful
-partial result, it can replace the volatile preview without restarting capture;
-the best tier available at stop makes the final pass. Seed every WhisperKit pass
-with prompt tokens from T3's domain vocabulary and the live shell snapshot to
-recover project, branch, and product terminology.
+stable live preview for the whole utterance; a severe volatile-result regression
+is ignored instead of clearing the visible text. The best WhisperKit tier
+available at stop makes a final pass, but replaces the system result only when
+its length and vocabulary plausibly agree. Seed WhisperKit with a small, stable
+product vocabulary only. Project and branch vocabulary belongs in
+SpeechAnalyzer's context because feeding it to the Whisper decoder can cause
+branch-name hallucinations.
 
 Cancel rolls back only if the draft still ends with exactly what dictation
 appended, so a mid-dictation edit is never eaten. The composer continues to

@@ -83,31 +83,25 @@ private struct VisionWhisperKitModelSpec: Sendable {
 
 @MainActor
 final class VisionWhisperKitSession {
-    enum Tier: Int, Sendable {
-        case base = 1
-        case large = 2
-    }
-
-    let tier: Tier
     let engineName: String
     private let whisperKit: WhisperKit
     private let promptTokens: [Int]?
 
     init(
         whisperKit: WhisperKit,
-        tier: Tier,
-        engineName: String,
-        contextualStrings: [String]
+        engineName: String
     ) {
         self.whisperKit = whisperKit
-        self.tier = tier
         self.engineName = engineName
 
         let domainVocabulary = [
             "T3 Code", "visionOS", "WhisperKit", "Codex", "Claude",
             "OpenCode", "Tailscale",
         ]
-        let vocabulary = (domainVocabulary + contextualStrings)
+        // Project and branch names are useful to SpeechAnalyzer, but they are
+        // too strong as a Whisper decoder prompt and can be hallucinated over
+        // otherwise valid speech. Keep this prompt small and stable.
+        let vocabulary = domainVocabulary
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         if let tokenizer = whisperKit.tokenizer, !vocabulary.isEmpty {
@@ -200,21 +194,17 @@ final class VisionWhisperKitService {
         await prepareIfNeeded()
     }
 
-    func bestSession(contextualStrings: [String]) -> VisionWhisperKitSession? {
+    func bestSession() -> VisionWhisperKitSession? {
         if let largeKit {
             return VisionWhisperKitSession(
                 whisperKit: largeKit,
-                tier: .large,
-                engineName: VisionWhisperKitModelSpec.large.displayName,
-                contextualStrings: contextualStrings
+                engineName: VisionWhisperKitModelSpec.large.displayName
             )
         }
         if let baseKit {
             return VisionWhisperKitSession(
                 whisperKit: baseKit,
-                tier: .base,
-                engineName: VisionWhisperKitModelSpec.base.displayName,
-                contextualStrings: contextualStrings
+                engineName: VisionWhisperKitModelSpec.base.displayName
             )
         }
         return nil
@@ -252,14 +242,20 @@ final class VisionWhisperKitService {
     }
 
     private func loadModel(_ spec: VisionWhisperKitModelSpec) async throws -> WhisperKit {
+        let preparationStartedAt = Date()
         state = .checkingCache(spec.displayName)
-        Self.logger.notice("Checking the \(spec.displayName, privacy: .public) cache")
+        Self.logger.notice("[model] \(spec.displayName, privacy: .public) cache check started")
 
         let modelFolder: URL
         if let cachedModelFolder = Self.cachedModelFolder(spec) {
             modelFolder = cachedModelFolder
+            Self.logger.notice(
+                "[model] \(spec.displayName, privacy: .public) cache hit at \(cachedModelFolder.path, privacy: .private(mask: .hash))"
+            )
         } else {
+            Self.logger.notice("[model] \(spec.displayName, privacy: .public) cache miss; download started")
             let progressReporter = VisionWhisperKitProgressReporter()
+            let downloadStartedAt = Date()
             modelFolder = try await WhisperKit.download(
                 variant: spec.variant,
                 progressCallback: { progress in
@@ -272,9 +268,14 @@ final class VisionWhisperKitService {
                     }
                 }
             )
+            Self.logger.notice(
+                "[model] \(spec.displayName, privacy: .public) download finished in \(Date().timeIntervalSince(downloadStartedAt), format: .fixed(precision: 2))s"
+            )
         }
 
         state = .loading(spec.displayName)
+        let loadStartedAt = Date()
+        Self.logger.notice("[model] \(spec.displayName, privacy: .public) Core ML load started")
         let slowLoadingTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(15))
             guard !Task.isCancelled, let self,
@@ -291,6 +292,9 @@ final class VisionWhisperKitService {
             download: false
         ))
         try await whisperKit.loadModels()
+        Self.logger.notice(
+            "[model] \(spec.displayName, privacy: .public) Core ML load finished in \(Date().timeIntervalSince(loadStartedAt), format: .fixed(precision: 2))s; total \(Date().timeIntervalSince(preparationStartedAt), format: .fixed(precision: 2))s"
+        )
         return whisperKit
     }
 
@@ -311,11 +315,10 @@ final class VisionWhisperKitService {
     }
 }
 
-/// Starts with Apple's recognizer and additively upgrades the same buffered
-/// utterance through whichever WhisperKit tier becomes available.
+/// Streams Apple's recognizer for a stable live preview, then lets the best
+/// available WhisperKit tier refine the buffered utterance when it agrees.
 @MainActor
 final class VisionDictationController {
-    private static let liveUpdateSampleInterval = 24_000
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
         category: "Dictation"
@@ -323,12 +326,11 @@ final class VisionDictationController {
 
     private let systemController = VisionSystemDictationController()
     private var isRunning = false
-    private var liveTranscriptionTask: Task<Void, Never>?
-    private var bufferContinuation: AsyncStream<Void>.Continuation?
-    private var contextualStrings: [String] = []
     private var systemFinalizedText = ""
     private var systemVolatileText = ""
-    private var whisperPreviewTier: VisionWhisperKitSession.Tier?
+    private var lastSystemPreview = ""
+    private var utteranceID = ""
+    private var utteranceStartedAt = Date()
 
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
@@ -356,47 +358,52 @@ final class VisionDictationController {
 
     func start(contextualStrings: [String]) async throws {
         guard !isRunning else { return }
-        self.contextualStrings = contextualStrings
         systemFinalizedText = ""
         systemVolatileText = ""
-        whisperPreviewTier = nil
-
-        let (bufferSignals, continuation) = AsyncStream.makeStream(
-            of: Void.self,
-            bufferingPolicy: .bufferingNewest(1)
+        lastSystemPreview = ""
+        utteranceID = String(UUID().uuidString.prefix(8))
+        utteranceStartedAt = Date()
+        Self.logger.notice(
+            "[utterance \(self.utteranceID, privacy: .public)] starting with System dictation; Whisper availability: \(VisionWhisperKitService.shared.activeEngineName, privacy: .public)"
         )
-        systemController.onBufferCaptured = {
-            continuation.yield(())
-        }
         do {
             try await systemController.start(contextualStrings: contextualStrings)
         } catch {
-            continuation.finish()
-            systemController.onBufferCaptured = nil
+            Self.logger.error(
+                "[utterance \(self.utteranceID, privacy: .public)] System dictation start failed: \(error.localizedDescription, privacy: .public)"
+            )
             throw error
         }
 
-        bufferContinuation = continuation
         isRunning = true
-        liveTranscriptionTask = Task { [weak self] in
-            await self?.transcribeLiveUpdates(from: bufferSignals)
-        }
+        Self.logger.notice("[utterance \(self.utteranceID, privacy: .public)] microphone capture started")
     }
 
     func finish() async {
         guard isRunning else { return }
         isRunning = false
-        let samples = systemController.snapshotSamples()
         await systemController.finish()
-        await stopLiveUpdates()
+        let samples = systemController.snapshotSamples()
 
         let fallbackText = combinedSystemText
-        if let session = VisionWhisperKitService.shared.bestSession(
-            contextualStrings: contextualStrings
-        ), !samples.isEmpty {
+        Self.logger.notice(
+            "[utterance \(self.utteranceID, privacy: .public)] capture stopped after \(Date().timeIntervalSince(self.utteranceStartedAt), format: .fixed(precision: 2))s with \(samples.count, privacy: .public) samples and \(fallbackText.count, privacy: .public) System characters"
+        )
+        if let session = VisionWhisperKitService.shared.bestSession(), !samples.isEmpty {
             do {
+                let transcriptionStartedAt = Date()
+                Self.logger.notice(
+                    "[utterance \(self.utteranceID, privacy: .public)] final \(session.engineName, privacy: .public) pass started"
+                )
                 let text = try await session.transcribe(audioSamples: samples)
-                if !text.isEmpty {
+                let decision = Self.whisperDecision(
+                    candidate: text,
+                    fallback: fallbackText
+                )
+                Self.logger.notice(
+                    "[utterance \(self.utteranceID, privacy: .public)] final \(session.engineName, privacy: .public) pass finished in \(Date().timeIntervalSince(transcriptionStartedAt), format: .fixed(precision: 2))s with \(text.count, privacy: .public) characters; \(decision.reason, privacy: .public)"
+                )
+                if decision.accepted {
                     onFinalized?(text)
                     resetUtterance()
                     return
@@ -407,14 +414,19 @@ final class VisionDictationController {
                 )
             }
         }
-        if !fallbackText.isEmpty { onFinalized?(fallbackText) }
+        if !fallbackText.isEmpty {
+            Self.logger.notice("[utterance \(self.utteranceID, privacy: .public)] selected System dictation fallback")
+            onFinalized?(fallbackText)
+        } else {
+            Self.logger.error("[utterance \(self.utteranceID, privacy: .public)] no engine produced text")
+        }
         resetUtterance()
     }
 
     func cancel() async {
         isRunning = false
         await systemController.cancel()
-        await stopLiveUpdates()
+        Self.logger.notice("[utterance \(self.utteranceID, privacy: .public)] cancelled")
         resetUtterance()
     }
 
@@ -427,8 +439,18 @@ final class VisionDictationController {
 
     private func handleSystemVolatile(_ text: String) {
         systemVolatileText = text
-        guard whisperPreviewTier == nil else { return }
-        onVolatile?(combinedSystemText)
+        let preview = combinedSystemText
+        guard !preview.isEmpty else { return }
+        if !lastSystemPreview.isEmpty,
+           preview.count + 8 < lastSystemPreview.count,
+           Double(preview.count) < Double(lastSystemPreview.count) * 0.6 {
+            Self.logger.notice(
+                "[utterance \(self.utteranceID, privacy: .public)] ignored System volatile regression from \(self.lastSystemPreview.count, privacy: .public) to \(preview.count, privacy: .public) characters"
+            )
+            return
+        }
+        lastSystemPreview = preview
+        onVolatile?(preview)
     }
 
     private func handleSystemFinalized(_ text: String) {
@@ -438,52 +460,57 @@ final class VisionDictationController {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         systemVolatileText = ""
-        guard whisperPreviewTier == nil else { return }
-        onVolatile?(combinedSystemText)
-    }
-
-    private func stopLiveUpdates() async {
-        systemController.onBufferCaptured = nil
-        bufferContinuation?.finish()
-        bufferContinuation = nil
-        liveTranscriptionTask?.cancel()
-        await liveTranscriptionTask?.value
-        liveTranscriptionTask = nil
-    }
-
-    private func transcribeLiveUpdates(from signals: AsyncStream<Void>) async {
-        var lastTranscribedSampleCount = 0
-        for await _ in signals {
-            guard !Task.isCancelled, isRunning else { return }
-            let samples = systemController.snapshotSamples()
-            guard samples.count >= Self.liveUpdateSampleInterval,
-                  samples.count - lastTranscribedSampleCount
-                    >= Self.liveUpdateSampleInterval,
-                  let session = VisionWhisperKitService.shared.bestSession(
-                    contextualStrings: contextualStrings
-                  ) else { continue }
-            lastTranscribedSampleCount = samples.count
-
-            do {
-                let text = try await session.transcribe(audioSamples: samples)
-                guard !Task.isCancelled, isRunning else { return }
-                guard !text.isEmpty else { continue }
-                whisperPreviewTier = session.tier
-                onVolatile?(text)
-            } catch is CancellationError {
-                return
-            } catch {
-                Self.logger.error(
-                    "Live \(session.engineName, privacy: .public) transcription failed: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-        }
+        let preview = combinedSystemText
+        lastSystemPreview = preview
+        onVolatile?(preview)
     }
 
     private func resetUtterance() {
-        contextualStrings = []
         systemFinalizedText = ""
         systemVolatileText = ""
-        whisperPreviewTier = nil
+        lastSystemPreview = ""
+        utteranceID = ""
+    }
+
+    private static func whisperDecision(
+        candidate: String,
+        fallback: String
+    ) -> (accepted: Bool, reason: String) {
+        let candidateWords = normalizedWords(candidate)
+        guard !candidateWords.isEmpty else { return (false, "rejected empty output") }
+
+        let counts = Dictionary(grouping: candidateWords, by: { $0 }).mapValues(\.count)
+        if let mostRepeated = counts.values.max(),
+           mostRepeated >= 4,
+           Double(mostRepeated) / Double(candidateWords.count) > 0.45 {
+            return (false, "rejected repetitive output")
+        }
+
+        let fallbackWords = normalizedWords(fallback)
+        guard !fallbackWords.isEmpty else {
+            return (false, "rejected because System dictation heard no speech")
+        }
+
+        let lengthRatio = Double(candidate.count) / Double(max(1, fallback.count))
+        guard (0.45...2.2).contains(lengthRatio) else {
+            return (false, "rejected implausible length ratio")
+        }
+
+        let candidateSet = Set(candidateWords)
+        let fallbackSet = Set(fallbackWords)
+        let shared = candidateSet.intersection(fallbackSet).count
+        let overlap = Double(shared) / Double(max(1, min(candidateSet.count, fallbackSet.count)))
+        let compactCandidate = candidateWords.joined()
+        let compactFallback = fallbackWords.joined()
+        guard overlap >= 0.35 || compactCandidate == compactFallback else {
+            return (false, "rejected low agreement with System dictation")
+        }
+        return (true, "accepted with \(Int(overlap * 100))% token agreement")
+    }
+
+    private static func normalizedWords(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
     }
 }

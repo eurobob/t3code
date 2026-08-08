@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import OSLog
 import Speech
 
 private final class VisionSystemSampleStore: @unchecked Sendable {
@@ -32,6 +33,11 @@ private final class VisionSystemSampleStore: @unchecked Sendable {
 /// Apple's native transcription path. It remains available while WhisperKit
 /// models prepare and provides volatile and finalized phrases in real time.
 final class VisionSystemDictationController {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
+        category: "Dictation"
+    )
+
     private let audioEngine = AVAudioEngine()
     private var analyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
@@ -47,7 +53,6 @@ final class VisionSystemDictationController {
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
     var onError: (@MainActor @Sendable (String) -> Void)?
-    var onBufferCaptured: (@Sendable () -> Void)?
 
     func start(contextualStrings: [String]) async throws {
         guard !isRunning else { return }
@@ -56,6 +61,9 @@ final class VisionSystemDictationController {
         ) else {
             throw VisionDictationError.localeUnsupported
         }
+        Self.logger.notice(
+            "[system] preparing SpeechAnalyzer for \(locale.identifier, privacy: .public) with \(contextualStrings.count, privacy: .public) context entries"
+        )
 
         let transcriber = SpeechTranscriber(
             locale: locale,
@@ -65,11 +73,18 @@ final class VisionSystemDictationController {
         )
         self.transcriber = transcriber
 
+        let assetsStartedAt = Date()
         try await AssetInventory.reserve(locale: locale)
         if let installation = try await AssetInventory.assetInstallationRequest(
             supporting: [transcriber]
         ) {
+            Self.logger.notice("[system] SpeechAnalyzer asset installation started")
             try await installation.downloadAndInstall()
+            Self.logger.notice(
+                "[system] SpeechAnalyzer asset installation finished in \(Date().timeIntervalSince(assetsStartedAt), format: .fixed(precision: 2))s"
+            )
+        } else {
+            Self.logger.notice("[system] SpeechAnalyzer assets already available")
         }
 
         let analyzer = SpeechAnalyzer(modules: [transcriber])
@@ -99,6 +114,9 @@ final class VisionSystemDictationController {
                     let text = String(result.text.characters)
                     guard !text.isEmpty else { continue }
                     if result.isFinal {
+                        Self.logger.notice(
+                            "[system] finalized result with \(text.count, privacy: .public) characters"
+                        )
                         self?.onFinalized?(text)
                     } else {
                         self?.onVolatile?(text)
@@ -107,6 +125,9 @@ final class VisionSystemDictationController {
             } catch is CancellationError {
                 return
             } catch {
+                Self.logger.error(
+                    "[system] result stream failed: \(error.localizedDescription, privacy: .public)"
+                )
                 self?.onError?(error.localizedDescription)
             }
         }
@@ -115,6 +136,7 @@ final class VisionSystemDictationController {
         try await analyzer.start(inputSequence: inputs)
         try startCapture()
         isRunning = true
+        Self.logger.notice("[system] SpeechAnalyzer and audio engine started")
     }
 
     func finish() async {
@@ -127,6 +149,7 @@ final class VisionSystemDictationController {
         await pendingResults?.value
         resultsTask = nil
         await teardown()
+        Self.logger.notice("[system] SpeechAnalyzer finalized and stopped")
     }
 
     func cancel() async {
@@ -175,7 +198,6 @@ final class VisionSystemDictationController {
         if let sampleFormat,
            let converted = convertForSamples(buffer: buffer, to: sampleFormat) {
             sampleStore.append(converted)
-            onBufferCaptured?()
         }
     }
 
