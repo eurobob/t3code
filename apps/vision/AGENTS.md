@@ -154,12 +154,14 @@ immediate guard failures are not lost.
 Task detail opens to the full Conversation. A global Summary control opens a
 concise AI brief as a trailing third panel and keeps that choice while switching
 tasks. Opening the panel requests a wider visionOS window so the task sidebar,
-conversation, and summary retain readable widths. The brief puts unresolved
+conversation, and summary retain readable widths; closing it restores the
+compact width. The brief puts unresolved
 decisions first, then shows "What you asked", "What was done", and latest
 checkpoint file changes. Generation runs on the T3 server through its configured
 text-generation model (including Claude Sonnet when selected), and the Vision
-client caches the result per environment/task revision. It refreshes after the
-task changes, waits for active turns to settle, and offers manual regeneration.
+client caches the result per environment/task revision. It generates a stable
+snapshot while a turn is active, refreshes after that turn settles, and offers
+manual regeneration.
 Exact unresolved approval/input state remains deterministic so an AI summary
 cannot hide a required response.
 

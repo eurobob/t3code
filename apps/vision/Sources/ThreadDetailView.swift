@@ -261,6 +261,13 @@ final class ThreadDetailModel {
         ].joined(separator: ":")
     }
 
+    var summaryGenerationTaskID: String {
+        if isAgentWorking {
+            return "working:\(activeTurnID ?? thread?.latestTurn?.turnId ?? "pending")"
+        }
+        return "settled:\(summarySourceRevision ?? "none")"
+    }
+
     var visibleGeneratedSummary: GeneratedTaskSummary? {
         if isAgentWorking || summaryIsLoading {
             return generatedSummary
@@ -298,7 +305,6 @@ final class ThreadDetailModel {
 
     func ensureTaskSummary(using appModel: AppModel, force: Bool = false) async {
         guard !summaryIsLoading,
-              !isAgentWorking,
               let sourceRevision = summarySourceRevision else { return }
         let cacheKey = taskSummaryCacheKey(environmentID: appModel.environment?.id)
 
@@ -321,7 +327,7 @@ final class ThreadDetailModel {
         do {
             let summary = try await appModel.generateTaskSummary(threadID: threadID)
             try Task.checkCancellation()
-            guard summarySourceRevision == sourceRevision else { return }
+            guard isAgentWorking || summarySourceRevision == sourceRevision else { return }
             generatedSummary = summary
             generatedSummaryRevision = sourceRevision
             if let data = try? JSONEncoder().encode(
@@ -1091,7 +1097,8 @@ struct ThreadDetailView: View {
         .background {
             VisionWindowWidthController(
                 isExpanded: showsSummaryPanel,
-                expandedWidth: 1_480
+                expandedWidth: 1_480,
+                collapsedWidth: 900
             )
             .frame(width: 0, height: 0)
         }
@@ -1238,8 +1245,7 @@ struct ThreadDetailView: View {
                 TaskBriefCard(
                     title: "What you asked",
                     icon: "text.bubble",
-                    text: model.visibleGeneratedSummary?.asked
-                        ?? (model.summaryError == nil ? nil : originalRequest),
+                    text: model.visibleGeneratedSummary?.asked ?? originalRequest,
                     emptyText: model.summaryIsLoading
                         ? "Generating an AI brief…"
                         : "The task request has not arrived yet.",
@@ -1250,8 +1256,7 @@ struct ThreadDetailView: View {
                 TaskBriefCard(
                     title: "What was done",
                     icon: "checkmark.circle",
-                    text: model.visibleGeneratedSummary?.done
-                        ?? (model.summaryError == nil ? nil : latestResult),
+                    text: model.visibleGeneratedSummary?.done ?? latestResult,
                     emptyText: model.summaryIsLoading
                         ? "Reading the task history…"
                         : (model.isAgentWorking
@@ -1278,7 +1283,7 @@ struct ThreadDetailView: View {
             .frame(maxWidth: .infinity)
             .padding(20)
         }
-        .task(id: "\(model.summarySourceRevision ?? "none"):\(model.isAgentWorking)") {
+        .task(id: model.summaryGenerationTaskID) {
             await model.ensureTaskSummary(using: appModel)
         }
     }
@@ -1322,7 +1327,7 @@ struct ThreadDetailView: View {
                     .labelStyle(.iconOnly)
             }
             .buttonStyle(.bordered)
-            .disabled(model.summaryIsLoading || model.isAgentWorking)
+            .disabled(model.summaryIsLoading)
             .accessibilityLabel("Regenerate AI task brief")
         }
 
