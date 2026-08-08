@@ -82,7 +82,6 @@ private final class VisionScreenCaptureSession: NSObject,
         do {
             let configuration = SCStreamConfiguration()
             configuration.capturesAudio = false
-            configuration.queueDepth = 1
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
             self.stream = stream
