@@ -78,7 +78,7 @@ struct VisionImageAttachmentPicker: View {
             Button(
                 VisionScreenCapture.isSupported
                     ? "Capture Shared Content"
-                    : "Capture Shared Content (Requires visionOS 27)"
+                    : "Capture Shared Content (Unavailable)"
             ) {
                 Task {
                     try? await Task.sleep(for: .milliseconds(300))
@@ -91,7 +91,7 @@ struct VisionImageAttachmentPicker: View {
             if VisionScreenCapture.isSupported {
                 Text("Capture Shared Content lets you choose a window or other shareable content and attaches one frame.")
             } else {
-                Text("Shared-content capture requires visionOS 27 and an app built with Xcode 27. Photo Library and Files remain available on visionOS 26.")
+                Text("Screen recording is unavailable or not allowed on this device.")
             }
         }
         .sheet(isPresented: $showsPhotos) {

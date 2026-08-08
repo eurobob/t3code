@@ -44,7 +44,7 @@ so concurrent Vision work is preserved rather than replaced.
 
 ## Building
 
-**This repo checkout cannot build the app** unless it is on macOS with Xcode 26
+**This repo checkout cannot build the app** unless it is on macOS with Xcode 27
 and the visionOS SDK. A Linux box can write and reason about the Swift, but
 cannot compile it, run tests, or deploy to the headset.
 
@@ -172,8 +172,10 @@ draft and volatile phrases only for the HUD; cancel preserves edits that do not
 exactly match the dictated suffix. Task ordering is local to each paired Vision
 client because the server has no thread-order command.
 
-The implementation passed an Xcode 26 visionOS device build and was installed
-and launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
+The client now targets visionOS 27 and requires Xcode 27 so its ScreenCaptureKit
+shared-content picker compiles directly, without a visionOS 26 fallback. The
+earlier visionOS 26 implementation passed a device build and was installed and
+launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
 most recently at product commit `ab7f87a7`.
 It still needs a hands-on interaction pass, especially for the Speech framework
 capture path, tap target, pairing restoration, and multi-window

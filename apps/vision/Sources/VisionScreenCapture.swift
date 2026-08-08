@@ -1,11 +1,8 @@
 import Foundation
-
-#if compiler(>=6.4) && canImport(ScreenCaptureKit)
 import CoreImage
 import CoreMedia
 @preconcurrency import ScreenCaptureKit
 import UIKit
-#endif
 
 enum VisionScreenCaptureError: LocalizedError {
     case unavailable
@@ -15,7 +12,7 @@ enum VisionScreenCaptureError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable: "Shared-content capture requires visionOS 27 and an Xcode 27 build."
+        case .unavailable: "Shared-content capture is unavailable on this device."
         case .cancelled: "Screen capture was cancelled."
         case .noFrame: "The selected content did not produce an image."
         case .encodingFailed: "The captured frame could not be encoded."
@@ -25,26 +22,14 @@ enum VisionScreenCaptureError: LocalizedError {
 
 enum VisionScreenCapture {
     static var isSupported: Bool {
-        #if compiler(>=6.4) && canImport(ScreenCaptureKit)
-        if #available(visionOS 27.0, *) {
-            return SCContentSharingPicker.shared.isAvailable
-        }
-        #endif
-        return false
+        SCContentSharingPicker.shared.isAvailable
     }
 
     static func captureImageData() async throws -> Data {
-        #if compiler(>=6.4) && canImport(ScreenCaptureKit)
-        if #available(visionOS 27.0, *) {
-            return try await VisionScreenCaptureSession.capture()
-        }
-        #endif
-        throw VisionScreenCaptureError.unavailable
+        try await VisionScreenCaptureSession.capture()
     }
 }
 
-#if compiler(>=6.4) && canImport(ScreenCaptureKit)
-@available(visionOS 27.0, *)
 @MainActor
 private final class VisionScreenCaptureSession: NSObject,
     SCContentSharingPickerObserver,
@@ -148,4 +133,3 @@ private final class VisionScreenCaptureSession: NSObject,
         }
     }
 }
-#endif

@@ -10,7 +10,7 @@ name: T3Vision
 options:
   bundleIdPrefix: com.t3tools.t3code
   deploymentTarget:
-    visionOS: "26.0"
+    visionOS: "27.0"
   createIntermediateGroups: true
 
 packages:
