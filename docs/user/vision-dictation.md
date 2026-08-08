@@ -21,9 +21,10 @@ result instead of replacing valid speech with a hallucination.
 
 Select the microphone again when you want WhisperKit to refine the transcript
 before editing it. Select Send while recording for the latency-first path: T3
-immediately sends the system transcript already on screen and stops recording
-in the background. A dispatch failure restores that exact combined draft so it
-can be retried or edited.
+immediately stops recording, asks the system recognizer to finalize through the
+end of the captured audio, skips the slower WhisperKit pass, and then sends.
+Network dispatch remains optimistic; a failure restores the exact combined
+draft so it can be retried or edited.
 
 The first WhisperKit upgrade downloads roughly 147 MB; the later Large v3
 upgrade is roughly 626 MB. Later launches reuse both device caches, although the

@@ -66,6 +66,7 @@ final class ThreadDetailModel {
         case preparing(String)
         case listening
         case finishing
+        case finishingToSend
 
         var label: String? {
             switch self {
@@ -73,6 +74,7 @@ final class ThreadDetailModel {
             case let .preparing(label): label
             case .listening: "Listening…"
             case .finishing: "Transcribing on device…"
+            case .finishingToSend: "Finishing speech before sending…"
             }
         }
     }
@@ -810,34 +812,7 @@ final class ThreadDetailModel {
     }
 
     func finishDictationAndSubmit(using appModel: AppModel) {
-        let liveText = volatileDictation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard dictationActive, !liveText.isEmpty else {
-            finishDictation(submitUsing: appModel)
-            return
-        }
-
-        // Send is the latency-first path: use the transcript already visible to
-        // the user and enter the normal optimistic send flow immediately. The
-        // microphone Stop button remains the quality-first Whisper refinement.
-        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
-        draft += separator + liveText
-        dictationActive = false
-        volatileDictation = ""
-        committedDictation = ""
-        dictationPhase = .idle
-        submitAfterDictationAppModel = nil
-        VisionDictationDiagnostics.shared.record(
-            "Send used the visible System transcript immediately; capture is stopping in the background"
-        )
-
-        let preparationTask = dictationTask
-        dictationTask?.cancel()
-        dictationTask = Task { [weak self] in
-            await preparationTask?.value
-            await self?.dictationController.cancel()
-            self?.dictationTask = nil
-        }
-        submit(using: appModel)
+        finishDictation(submitUsing: appModel)
     }
 
     private func finishDictation(submitUsing appModel: AppModel?) {
@@ -851,14 +826,19 @@ final class ThreadDetailModel {
             }
             return
         }
-        guard dictationPhase != .finishing else { return }
-        dictationPhase = .finishing
+        guard dictationPhase != .finishing,
+              dictationPhase != .finishingToSend else { return }
+        dictationPhase = appModel == nil ? .finishing : .finishingToSend
         let preparationTask = dictationTask
         dictationTask = Task { [weak self] in
             guard let self else { return }
             await preparationTask?.value
             guard dictationActive else { return }
-            await dictationController.finish()
+            if submitAfterDictationAppModel == nil {
+                await dictationController.finish()
+            } else {
+                await dictationController.finishForSending()
+            }
             guard dictationActive else {
                 dictationTask = nil
                 submitAfterDictationAppModel = nil

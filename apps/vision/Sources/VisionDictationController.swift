@@ -262,7 +262,9 @@ final class VisionWhisperKitService {
         let modelFolder: URL
         if let cachedModelFolder = Self.cachedModelFolder(spec) {
             modelFolder = cachedModelFolder
-            Self.recordDiagnostic("\(spec.displayName): cache hit")
+            Self.recordDiagnostic(
+                "\(spec.displayName): model files cache hit; Core ML specialization cache status is unavailable"
+            )
             Self.logger.notice(
                 "[model] \(spec.displayName, privacy: .public) cache hit at \(cachedModelFolder.path, privacy: .private(mask: .hash))"
             )
@@ -293,7 +295,15 @@ final class VisionWhisperKitService {
 
         state = .loading(spec.displayName)
         let loadStartedAt = Date()
-        Self.recordDiagnostic("\(spec.displayName): Core ML load started")
+        let previousLoad = UserDefaults.standard.double(
+            forKey: "vision.dictation.model-load.\(spec.variant)"
+        )
+        let previousDescription = previousLoad > 0
+            ? "; previous load was \(String(format: "%.2f", previousLoad))s"
+            : ""
+        Self.recordDiagnostic(
+            "\(spec.displayName): Core ML load started with Mel CPU+GPU, encoder CPU+ANE, decoder CPU+ANE\(previousDescription)"
+        )
         Self.logger.notice("[model] \(spec.displayName, privacy: .public) Core ML load started")
         let slowLoadingTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(15))
@@ -311,8 +321,23 @@ final class VisionWhisperKitService {
             download: false
         ))
         try await whisperKit.loadModels()
+        let totalLoad = Date().timeIntervalSince(loadStartedAt)
+        UserDefaults.standard.set(
+            totalLoad,
+            forKey: "vision.dictation.model-load.\(spec.variant)"
+        )
+        let timings = whisperKit.currentTimings
+        let measuredComponents = timings.decoderLoadTime
+            + timings.encoderLoadTime
+            + timings.tokenizerLoadTime
+        let otherLoadTime = max(0, totalLoad - measuredComponents)
         Self.recordDiagnostic(
-            "\(spec.displayName): Core ML load finished in \(Self.secondsSince(loadStartedAt))s; total \(Self.secondsSince(preparationStartedAt))s"
+            "\(spec.displayName): Core ML load finished in \(String(format: "%.2f", totalLoad))s "
+                + "(decoder \(String(format: "%.2f", timings.decoderLoadTime))s, "
+                + "encoder \(String(format: "%.2f", timings.encoderLoadTime))s, "
+                + "tokenizer \(String(format: "%.2f", timings.tokenizerLoadTime))s, "
+                + "Mel/other \(String(format: "%.2f", otherLoadTime))s); "
+                + "total preparation \(Self.secondsSince(preparationStartedAt))s"
         )
         Self.logger.notice(
             "[model] \(spec.displayName, privacy: .public) Core ML load finished in \(Date().timeIntervalSince(loadStartedAt), format: .fixed(precision: 2))s; total \(Date().timeIntervalSince(preparationStartedAt), format: .fixed(precision: 2))s"
@@ -462,6 +487,20 @@ final class VisionDictationController {
         } else {
             Self.logger.error("[utterance \(self.utteranceID, privacy: .public)] no engine produced text")
         }
+        resetUtterance()
+    }
+
+    /// Finalizes Apple's streaming recognizer through the end of microphone
+    /// input, but skips the slower Whisper pass when the user has chosen Send.
+    func finishForSending() async {
+        guard isRunning else { return }
+        isRunning = false
+        await systemController.finish()
+        let text = combinedSystemText
+        Self.recordDiagnostic(
+            "Utterance \(utteranceID): Send finalized System dictation with \(text.count) characters; skipped Whisper final pass"
+        )
+        if !text.isEmpty { onFinalized?(text) }
         resetUtterance()
     }
 
