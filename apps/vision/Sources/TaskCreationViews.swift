@@ -17,6 +17,7 @@ struct NewTaskView: View {
     @State private var interactionModeID = InteractionMode.default.rawValue
     @State private var isCreating = false
     @State private var errorMessage: String?
+    @State private var attachments: [VisionDraftAttachment] = []
 
     init(
         projectID: String?,
@@ -89,6 +90,15 @@ struct NewTaskView: View {
                 TextField("Name (optional)", text: $title)
                 TextField("What should the agent do?", text: $prompt, axis: .vertical)
                     .lineLimit(4...12)
+                VisionAttachmentStrip(attachments: $attachments)
+                HStack {
+                    VisionImageAttachmentPicker(
+                        attachments: $attachments,
+                        isEnabled: !isCreating
+                    )
+                    Text(attachments.isEmpty ? "Add images" : "\(attachments.count) of 8 images")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Agent") {
@@ -158,7 +168,8 @@ struct NewTaskView: View {
                         isCreating
                             || selectedProject == nil
                             || selectedModel == nil
-                            || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || (prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                && attachments.isEmpty)
                     )
             }
         }
@@ -234,19 +245,21 @@ struct NewTaskView: View {
               let project = selectedProject,
               let selection = selectedModel else { return }
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPrompt.isEmpty else { return }
+        guard !trimmedPrompt.isEmpty || !attachments.isEmpty else { return }
 
         isCreating = true
         errorMessage = nil
         Task {
             do {
+                let uploads = try attachments.map { try $0.uploadValue() }
                 let threadID = try await model.createThreadAndSend(
                     projectID: project.id,
                     title: resolvedTitle(prompt: trimmedPrompt),
                     text: trimmedPrompt,
                     model: selection,
                     runtimeMode: RuntimeMode(rawValue: runtimeModeID) ?? .fullAccess,
-                    interactionMode: InteractionMode(rawValue: interactionModeID) ?? .default
+                    interactionMode: InteractionMode(rawValue: interactionModeID) ?? .default,
+                    attachments: uploads
                 )
                 onCreated(threadID)
             } catch {
@@ -259,6 +272,7 @@ struct NewTaskView: View {
     private func resolvedTitle(prompt: String) -> String {
         let explicit = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !explicit.isEmpty { return explicit }
+        if prompt.isEmpty { return "Image task" }
         let compact = prompt.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         guard compact.count > 72 else { return compact }
         return "\(compact.prefix(69))…"

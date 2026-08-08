@@ -132,6 +132,7 @@ final class ThreadDetailModel {
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
     var draft = ""
+    var attachments: [VisionDraftAttachment] = []
 
     @ObservationIgnored
     private var eventsTask: Task<Void, Never>?
@@ -261,13 +262,15 @@ final class ThreadDetailModel {
             return
         }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            actionError = "Type a message before sending."
+        guard !text.isEmpty || !attachments.isEmpty else {
+            actionError = "Type a message or add an image before sending."
             return
         }
 
         let optimisticDraft = draft
+        let optimisticAttachments = attachments
         draft = ""
+        attachments = []
         submissionRevision &+= 1
         turnBeforeSubmissionID = thread?.latestTurn?.turnId
         awaitingAgentStart = true
@@ -278,6 +281,7 @@ final class ThreadDetailModel {
             await performSend(
                 text: text,
                 restoringOnFailure: optimisticDraft,
+                attachments: optimisticAttachments,
                 using: appModel
             )
             actionTask = nil
@@ -664,6 +668,7 @@ final class ThreadDetailModel {
     private func performSend(
         text: String,
         restoringOnFailure optimisticDraft: String,
+        attachments optimisticAttachments: [VisionDraftAttachment],
         using appModel: AppModel
     ) async {
         defer { actionState = .idle }
@@ -701,7 +706,12 @@ final class ThreadDetailModel {
                 actionState = .sending
             }
 
-            _ = try await appModel.sendTurn(thread: currentThread, text: text)
+            let uploads = try optimisticAttachments.map { try $0.uploadValue() }
+            _ = try await appModel.sendTurn(
+                thread: currentThread,
+                text: text,
+                attachments: uploads
+            )
             actionNotice = nil
             scheduleRefresh(using: appModel)
         } catch is CancellationError {
@@ -713,6 +723,11 @@ final class ThreadDetailModel {
                 draft = optimisticDraft
                 draftRestorationRevision &+= 1
             }
+            let currentIDs = Set(attachments.map(\.id))
+            attachments.insert(
+                contentsOf: optimisticAttachments.filter { !currentIDs.contains($0.id) },
+                at: 0
+            )
             actionError = error.localizedDescription
         }
     }
@@ -1206,7 +1221,14 @@ struct ThreadDetailView: View {
                 .disabled(model.isBusy)
             }
 
+            VisionAttachmentStrip(attachments: $model.attachments)
+
             HStack(alignment: .center, spacing: 18) {
+                VisionImageAttachmentPicker(
+                    attachments: $model.attachments,
+                    isEnabled: !model.isBusy && !model.isDictating
+                )
+
                 Button {
                     if draftEditorMode == .hidden {
                         draftEditorMode = prefersHardwareEditor
@@ -1252,7 +1274,8 @@ struct ThreadDetailView: View {
                 .disabled(
                     model.isBusy
                         || (!model.isDictating
-                            && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && model.attachments.isEmpty)
                     )
             }
 
@@ -1725,7 +1748,7 @@ private struct MessageBubble: View {
                 }
             }
 
-            if message.text.isEmpty {
+            if message.text.isEmpty, message.attachments?.isEmpty != false {
                 Text(message.streaming ? "Thinking…" : "No text")
                     .foregroundStyle(.secondary)
                     .italic()
@@ -1738,11 +1761,7 @@ private struct MessageBubble: View {
             }
 
             if let attachments = message.attachments, !attachments.isEmpty {
-                ForEach(attachments) { attachment in
-                    Label(attachment.name, systemImage: "paperclip")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                VisionMessageAttachmentsView(attachments: attachments)
             }
         }
         .padding(.horizontal, 16)

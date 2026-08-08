@@ -392,15 +392,22 @@ final class AppModel {
 
     func sendTurn(
         thread: OrchestrationThread,
-        text: String
+        text: String,
+        attachments: [UploadChatImageAttachment] = []
     ) async throws -> DispatchResult {
         guard let client else { throw ClientError.notConnected }
         return try await client.sendTurn(
             threadID: thread.id,
             text: text,
             runtimeMode: thread.runtimeMode,
-            interactionMode: thread.interactionMode
+            interactionMode: thread.interactionMode,
+            attachments: attachments
         )
+    }
+
+    func attachmentURL(id: String) async throws -> URL {
+        guard let client else { throw ClientError.notConnected }
+        return try await client.resolvedAssetURL(resource: .attachment(id: id))
     }
 
     func interrupt(threadID: String, turnID: String?) async throws -> DispatchResult {
@@ -469,7 +476,8 @@ final class AppModel {
         text: String,
         model: ModelSelection,
         runtimeMode: RuntimeMode,
-        interactionMode: InteractionMode
+        interactionMode: InteractionMode,
+        attachments: [UploadChatImageAttachment] = []
     ) async throws -> String {
         guard let client else { throw ClientError.notConnected }
         let threadID = UUID().uuidString
@@ -480,7 +488,8 @@ final class AppModel {
             text: text,
             model: model,
             runtimeMode: runtimeMode,
-            interactionMode: interactionMode
+            interactionMode: interactionMode,
+            attachments: attachments
         )
         return threadID
     }
