@@ -157,11 +157,13 @@ tasks. Opening the panel requests a wider visionOS window so the task sidebar,
 conversation, and summary retain readable widths; closing it restores the
 compact width. The brief puts unresolved
 decisions first, then shows "What you asked", "What was done", and latest
-checkpoint file changes. Generation runs on the T3 server through its configured
-text-generation model (including Claude Sonnet when selected), and the Vision
-client caches the result per environment/task revision. It generates a stable
-snapshot while a turn is active, refreshes after that turn settles, and offers
-manual regeneration.
+checkpoint file changes. Generation prefers the native T3 summary RPC. For
+environments that predate that RPC, the Vision client transparently runs a
+bounded, non-interactive Claude Sonnet request through the existing terminal
+transport; it does not add a visible task turn or require a server upgrade. The
+Vision client caches the result per environment/task revision. It generates a
+stable snapshot while a turn is active, refreshes after that turn settles, and
+offers manual regeneration.
 Exact unresolved approval/input state remains deterministic so an AI summary
 cannot hide a required response.
 

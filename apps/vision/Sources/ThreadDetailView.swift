@@ -11,6 +11,22 @@ final class ThreadDetailModel {
         let summary: GeneratedTaskSummary
     }
 
+    private struct ClaudeSummaryEnvelope: Decodable {
+        struct Payload: Codable {
+            let asked: String
+            let done: String
+            let needsYou: [String]
+        }
+
+        let structuredOutput: Payload?
+        let result: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case structuredOutput = "structured_output"
+            case result
+        }
+    }
+
     enum LoadState: Equatable {
         case loading
         case loaded
@@ -112,6 +128,34 @@ final class ThreadDetailModel {
                 message
             }
         }
+    }
+
+    private enum SummaryFallbackError: LocalizedError {
+        case threadUnavailable
+        case terminalStreamEnded
+        case terminalClosed
+        case commandFailed(String)
+        case malformedResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .threadUnavailable:
+                "The task workspace is unavailable."
+            case .terminalStreamEnded:
+                "The summary process stopped before returning a result."
+            case .terminalClosed:
+                "The summary terminal closed before returning a result."
+            case let .commandFailed(detail):
+                "Claude Sonnet could not generate the task summary. \(detail)"
+            case .malformedResponse:
+                "Claude Sonnet returned an unreadable task summary."
+            }
+        }
+    }
+
+    private enum SummaryCommandResult {
+        case success(String)
+        case failure(String)
     }
 
     private enum TurnSettlement {
@@ -325,7 +369,12 @@ final class ThreadDetailModel {
         defer { summaryIsLoading = false }
         summaryError = nil
         do {
-            let summary = try await appModel.generateTaskSummary(threadID: threadID)
+            let summary: GeneratedTaskSummary
+            do {
+                summary = try await appModel.generateTaskSummary(threadID: threadID)
+            } catch {
+                summary = try await generateTaskSummaryWithClaude(using: appModel)
+            }
             try Task.checkCancellation()
             guard isAgentWorking || summarySourceRevision == sourceRevision else { return }
             generatedSummary = summary
@@ -340,6 +389,198 @@ final class ThreadDetailModel {
         } catch {
             summaryError = error.localizedDescription
         }
+    }
+
+    /// Older T3 environments do not expose the summary RPC. Their existing
+    /// terminal transport can still run the user's Claude subscription without
+    /// adding a visible turn or mutating the task conversation.
+    private func generateTaskSummaryWithClaude(
+        using appModel: AppModel
+    ) async throws -> GeneratedTaskSummary {
+        guard let thread,
+              let project = appModel.snapshot?.projects.first(where: {
+                  $0.id == thread.projectId
+              }) else { throw SummaryFallbackError.threadUnavailable }
+
+        let prompt = taskSummaryPrompt(for: thread, projectTitle: project.title)
+        let encodedPrompt = Data(prompt.utf8).base64EncodedString()
+        let terminalID = "vision-summary-\(UUID().uuidString.lowercased())"
+        let marker = "__T3_VISION_SUMMARY_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+        let schema = #"{"type":"object","properties":{"asked":{"type":"string"},"done":{"type":"string"},"needsYou":{"type":"array","items":{"type":"string"}}},"required":["asked","done","needsYou"],"additionalProperties":false}"#
+        let command = """
+        stty -echo; t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -d 2>/dev/null)" || t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -D)"; t3_summary_output="$(printf %s "$t3_summary_prompt" | claude -p --model sonnet --tools '' --no-session-persistence --permission-mode dontAsk --output-format json --json-schema '\(schema)' 2>&1)"; t3_summary_status=$?; printf '\n\(marker)BEGIN\n%s\n\(marker)END:%s\n' "$t3_summary_output" "$t3_summary_status"; stty echo
+        """
+
+        let rawResponse = try await runSummaryCommand(
+            command,
+            marker: marker,
+            terminalID: terminalID,
+            thread: thread,
+            project: project,
+            using: appModel
+        )
+        let envelope = try JSONDecoder.t3.decode(
+            ClaudeSummaryEnvelope.self,
+            from: Data(rawResponse.utf8)
+        )
+        let payload: ClaudeSummaryEnvelope.Payload
+        if let structuredOutput = envelope.structuredOutput {
+            payload = structuredOutput
+        } else if let result = envelope.result,
+                  let data = result.data(using: .utf8),
+                  let decoded = try? JSONDecoder.t3.decode(
+                      ClaudeSummaryEnvelope.Payload.self,
+                      from: data
+                  ) {
+            payload = decoded
+        } else {
+            throw SummaryFallbackError.malformedResponse
+        }
+
+        return GeneratedTaskSummary(
+            asked: payload.asked,
+            done: payload.done,
+            needsYou: payload.needsYou,
+            modelSelection: ModelSelection(instanceId: "claude", model: "sonnet"),
+            generatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+    }
+
+    private func runSummaryCommand(
+        _ command: String,
+        marker: String,
+        terminalID: String,
+        thread: OrchestrationThread,
+        project: OrchestrationProject,
+        using appModel: AppModel
+    ) async throws -> String {
+        var terminalOpened = false
+        defer {
+            if terminalOpened {
+                Task {
+                    try? await appModel.closeTerminal(
+                        threadID: thread.id,
+                        terminalID: terminalID
+                    )
+                }
+            }
+        }
+
+        let initial = try await appModel.openTerminal(
+            threadID: thread.id,
+            terminalID: terminalID,
+            cwd: thread.worktreePath ?? project.workspaceRoot,
+            worktreePath: thread.worktreePath,
+            environmentVariables: [:]
+        )
+        terminalOpened = true
+        if initial.status == .error || initial.status == .exited {
+            throw SummaryFallbackError.commandFailed("The terminal could not start.")
+        }
+
+        let stream = try await appModel.attachTerminal(
+            threadID: thread.id,
+            terminalID: terminalID
+        )
+        var iterator = stream.makeAsyncIterator()
+        try await appModel.writeTerminal(
+            threadID: thread.id,
+            terminalID: terminalID,
+            data: "\(command)\r"
+        )
+
+        var output = initial.history
+        while let event = try await iterator.next() {
+            if let eventThreadID = event.threadId,
+               let eventTerminalID = event.terminalId,
+               (eventThreadID != thread.id || eventTerminalID != terminalID) {
+                continue
+            }
+            switch event.type {
+            case "snapshot", "started", "restarted":
+                if let snapshot = event.snapshot { output = snapshot.history }
+            case "output":
+                if let data = event.data {
+                    output.append(contentsOf: data)
+                    if output.count > 200_000 {
+                        output = String(output.suffix(160_000))
+                    }
+                }
+            case "error":
+                throw SummaryFallbackError.commandFailed(
+                    event.message ?? "The terminal reported an error."
+                )
+            case "closed", "exited":
+                throw SummaryFallbackError.terminalClosed
+            default:
+                break
+            }
+
+            if let result = extractSummaryResponse(from: output, marker: marker) {
+                switch result {
+                case let .success(response): return response
+                case let .failure(detail): throw SummaryFallbackError.commandFailed(detail)
+                }
+            }
+        }
+        throw SummaryFallbackError.terminalStreamEnded
+    }
+
+    private func extractSummaryResponse(
+        from output: String,
+        marker: String
+    ) -> SummaryCommandResult? {
+        let normalized = output
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard let begin = normalized.range(
+            of: "\(marker)BEGIN\n",
+            options: .backwards
+        ), let end = normalized.range(
+                  of: "\n\(marker)END:",
+                  range: begin.upperBound..<normalized.endIndex
+              ) else { return nil }
+        let statusStart = end.upperBound
+        let status = normalized[statusStart...].prefix { $0.isNumber }
+        guard let exitCode = Int(status) else { return nil }
+        let response = String(normalized[begin.upperBound..<end.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if exitCode == 0 { return .success(response) }
+        return .failure(response.isEmpty ? "The command exited with status \(exitCode)." : response)
+    }
+
+    private func taskSummaryPrompt(
+        for thread: OrchestrationThread,
+        projectTitle: String
+    ) -> String {
+        var sections = [
+            "Project: \(projectTitle)",
+            "Task: \(thread.title)",
+            "Return a concise task brief grounded only in the supplied history. "
+                + "'asked' must state the user's current goal, including important constraints. "
+                + "'done' must name concrete outcomes already completed and must not use process "
+                + "narration such as 'the agent is working on this now'. If nothing is complete, "
+                + "say so plainly and identify the current state. 'needsYou' must contain only "
+                + "specific decisions or actions the user must take; return an empty array when "
+                + "none are required. Do not invent implementation results.",
+        ]
+        let messages = thread.messages.suffix(40).map {
+            "\($0.role.uppercased()): \(String($0.text.prefix(2_000)))"
+        }
+        if !messages.isEmpty {
+            sections.append("Conversation:\n\(messages.joined(separator: "\n\n"))")
+        }
+        let activities = thread.activities.suffix(20).map {
+            "\($0.kind): \($0.summary)"
+        }
+        if !activities.isEmpty {
+            sections.append("Recent activity:\n\(activities.joined(separator: "\n"))")
+        }
+        if let checkpoint = thread.checkpoints.last {
+            let files = checkpoint.files.prefix(30).map { "\($0.kind) \($0.path)" }
+            sections.append("Latest checkpoint:\n\(files.joined(separator: "\n"))")
+        }
+        return sections.joined(separator: "\n\n")
     }
 
     private func taskSummaryCacheKey(environmentID: String?) -> String {
