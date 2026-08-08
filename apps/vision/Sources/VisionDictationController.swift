@@ -1,33 +1,89 @@
 import AVFoundation
 import Foundation
-import Speech
+import WhisperKit
 
 enum VisionDictationError: LocalizedError {
-    case localeUnsupported
     case microphonePermissionDenied
 
     var errorDescription: String? {
         switch self {
-        case .localeUnsupported:
-            "Dictation does not support this device's language yet."
         case .microphonePermissionDenied:
             "T3 Vision needs microphone access to dictate."
         }
     }
 }
 
-/// SpeechAnalyzer-backed capture for visionOS 26. Finalized phrases are
-/// committed by the feature model; volatile phrases are presentation-only.
+@MainActor
+private final class VisionWhisperKitPipeline {
+    static let shared = VisionWhisperKitPipeline()
+    static let model = "large-v3-v20240930_626MB"
+
+    private var whisperKit: WhisperKit?
+    private var preparationTask: Task<WhisperKit, Error>?
+
+    func prepare() async throws {
+        _ = try await preparedWhisperKit()
+    }
+
+    func transcribe(audioURL: URL) async throws -> String {
+        let whisperKit = try await preparedWhisperKit()
+        let results = try await whisperKit.transcribe(
+            audioPath: audioURL.path,
+            decodeOptions: DecodingOptions(
+                language: nil,
+                temperature: 0,
+                detectLanguage: true,
+                withoutTimestamps: true
+            )
+        )
+        return results
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func preparedWhisperKit() async throws -> WhisperKit {
+        if let whisperKit { return whisperKit }
+        if let preparationTask {
+            return try await preparationTask.value
+        }
+
+        let preparationTask = Task { @MainActor in
+            let modelFolder = try await WhisperKit.download(variant: Self.model)
+            let whisperKit = try await WhisperKit(WhisperKitConfig(
+                modelFolder: modelFolder.path,
+                verbose: false,
+                prewarm: false,
+                load: false,
+                download: false
+            ))
+            try await whisperKit.prewarmModels()
+            try await whisperKit.loadModels()
+            return whisperKit
+        }
+        self.preparationTask = preparationTask
+
+        do {
+            let whisperKit = try await preparationTask.value
+            self.whisperKit = whisperKit
+            self.preparationTask = nil
+            return whisperKit
+        } catch {
+            self.preparationTask = nil
+            throw error
+        }
+    }
+}
+
+/// Records one utterance and transcribes it locally with WhisperKit. WhisperKit
+/// is batch-based, so text is committed after the user stops recording.
+@MainActor
 final class VisionDictationController {
-    private let audioEngine = AVAudioEngine()
-    private var analyzer: SpeechAnalyzer?
-    private var transcriber: SpeechTranscriber?
-    private var inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
-    private var resultsTask: Task<Void, Never>?
-    private var converter: AVAudioConverter?
-    private var analyzerFormat: AVAudioFormat?
+    private let recorder = SpeechLabRecorder()
     private var isRunning = false
 
+    // Kept as part of the controller contract even though batch transcription
+    // does not emit volatile phrases.
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
     var onError: (@MainActor @Sendable (String) -> Void)?
@@ -42,166 +98,34 @@ final class VisionDictationController {
 
     func start(contextualStrings: [String]) async throws {
         guard !isRunning else { return }
-        guard let locale = await SpeechTranscriber.supportedLocale(
-            equivalentTo: Locale.current
-        ) else {
-            throw VisionDictationError.localeUnsupported
-        }
-
-        let transcriber = SpeechTranscriber(
-            locale: locale,
-            transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
-            attributeOptions: []
-        )
-        self.transcriber = transcriber
-
-        try await AssetInventory.reserve(locale: locale)
-        if let installation = try await AssetInventory.assetInstallationRequest(
-            supporting: [transcriber]
-        ) {
-            try await installation.downloadAndInstall()
-        }
-
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
-        self.analyzer = analyzer
-        if !contextualStrings.isEmpty {
-            let context = AnalysisContext()
-            context.contextualStrings = [.general: contextualStrings]
-            try await analyzer.setContext(context)
-        }
-
-        analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
-            compatibleWith: [transcriber]
-        )
-        let (inputs, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
-        inputBuilder = continuation
-
-        resultsTask = Task { @MainActor [weak self] in
-            do {
-                for try await result in transcriber.results {
-                    let text = String(result.text.characters)
-                    guard !text.isEmpty else { continue }
-                    if result.isFinal {
-                        self?.onFinalized?(text)
-                    } else {
-                        self?.onVolatile?(text)
-                    }
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                self?.onError?(error.localizedDescription)
-            }
-        }
-
-        try configureAudioSession()
-        try await analyzer.start(inputSequence: inputs)
-        try startCapture()
+        // WhisperKit does not consume SpeechAnalyzer contextual strings. Keep
+        // the parameter so the composer API can add prompt tokens later.
+        _ = contextualStrings
+        try await VisionWhisperKitPipeline.shared.prepare()
+        try Task.checkCancellation()
+        try recorder.start()
         isRunning = true
     }
 
-    /// Stops capture and flushes the in-flight phrase as finalized text.
     func finish() async {
         guard isRunning else { return }
-        stopCapture()
-        inputBuilder?.finish()
-        inputBuilder = nil
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        let pendingResults = resultsTask
-        await pendingResults?.value
-        resultsTask = nil
-        await teardown()
-    }
-
-    /// Stops capture and drops any phrase that has not already finalized.
-    func cancel() async {
-        if isRunning { stopCapture() }
-        inputBuilder?.finish()
-        inputBuilder = nil
-        await analyzer?.cancelAndFinishNow()
-        await teardown()
-    }
-
-    private func configureAudioSession() throws {
-        let session = AVAudioSession.sharedInstance()
-        // T3 Vision can move to the background when another app opens an
-        // immersive space. A mixable input/output session keeps that app's
-        // audio audible while this already-active recording continues.
-        try session.setCategory(
-            .playAndRecord,
-            mode: .default,
-            options: [.mixWithOthers, .allowBluetoothHFP]
-        )
-        try session.setActive(true)
-    }
-
-    private func startCapture() throws {
-        let input = audioEngine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            self?.append(buffer: buffer)
-        }
-        audioEngine.prepare()
-        try audioEngine.start()
-    }
-
-    private func stopCapture() {
-        if audioEngine.isRunning { audioEngine.stop() }
-        audioEngine.inputNode.removeTap(onBus: 0)
-    }
-
-    private func append(buffer: AVAudioPCMBuffer) {
-        guard let inputBuilder, let analyzerFormat,
-              let converted = convert(buffer: buffer, to: analyzerFormat) else { return }
-        inputBuilder.yield(AnalyzerInput(buffer: converted))
-    }
-
-    private func convert(
-        buffer: AVAudioPCMBuffer,
-        to format: AVAudioFormat
-    ) -> AVAudioPCMBuffer? {
-        if buffer.format == format { return buffer }
-        if converter?.outputFormat != format || converter?.inputFormat != buffer.format {
-            converter = AVAudioConverter(from: buffer.format, to: format)
-        }
-        guard let converter else { return nil }
-
-        let ratio = format.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up))
-        guard capacity > 0,
-              let output = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: capacity
-              ) else { return nil }
-
-        var consumed = false
-        var conversionError: NSError?
-        converter.convert(to: output, error: &conversionError) { _, status in
-            if consumed {
-                status.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            status.pointee = .haveData
-            return buffer
-        }
-        guard conversionError == nil, output.frameLength > 0 else { return nil }
-        return output
-    }
-
-    private func teardown() async {
-        resultsTask?.cancel()
-        resultsTask = nil
-        analyzer = nil
-        transcriber = nil
-        converter = nil
-        analyzerFormat = nil
         isRunning = false
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: [.notifyOthersOnDeactivation]
-        )
+        do {
+            let recording = try recorder.stop()
+            defer { try? FileManager.default.removeItem(at: recording.fileURL) }
+            let text = try await VisionWhisperKitPipeline.shared.transcribe(
+                audioURL: recording.fileURL
+            )
+            if !text.isEmpty { onFinalized?(text) }
+        } catch is CancellationError {
+            return
+        } catch {
+            onError?(error.localizedDescription)
+        }
+    }
+
+    func cancel() async {
+        if isRunning { recorder.cancel() }
+        isRunning = false
     }
 }

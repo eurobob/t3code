@@ -35,7 +35,7 @@ private enum SpeechLabError: LocalizedError {
     }
 }
 
-private struct SpeechLabRecording: Sendable {
+struct SpeechLabRecording: Sendable {
     let fileURL: URL
     let duration: TimeInterval
 }
@@ -70,7 +70,7 @@ private final class SpeechLabSampleStore: @unchecked Sendable {
 /// Captures one bounded sample and writes a plain 16 kHz mono PCM WAV that both
 /// engines consume. Keeping the recording path independent of SpeechAnalyzer
 /// makes the comparison about transcription rather than microphone input.
-private final class SpeechLabRecorder {
+final class SpeechLabRecorder {
     static let sampleRate = 16_000.0
 
     private let audioEngine = AVAudioEngine()

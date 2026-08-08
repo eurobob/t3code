@@ -70,9 +70,9 @@ final class ThreadDetailModel {
         var label: String? {
             switch self {
             case .idle: nil
-            case .preparing: "Preparing dictation…"
+            case .preparing: "Preparing WhisperKit…"
             case .listening: "Listening…"
-            case .finishing: "Finishing dictation…"
+            case .finishing: "Transcribing on device…"
             }
         }
     }
@@ -832,6 +832,11 @@ final class ThreadDetailModel {
             await preparationTask?.value
             guard dictationActive else { return }
             await dictationController.finish()
+            guard dictationActive else {
+                dictationTask = nil
+                submitAfterDictationAppModel = nil
+                return
+            }
             dictationActive = false
             volatileDictation = ""
             committedDictation = ""

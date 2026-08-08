@@ -260,18 +260,16 @@ dependent, so a timed mid-tool integration test is still required.
 
 ## Dictation
 
-An iPad implementation already exists on branch
-`t3code/build-visionos-dictation-app` in `apps/mobile/modules/t3-dictation`.
-Read it before designing this one. The important parts:
+T3 Vision uses WhisperKit with the compressed Large v3 Turbo model. The model
+is downloaded into the device cache once, prepared on first use after launch,
+and retained in memory for later dictation during that app session. WhisperKit
+is batch-based: recording begins only after preparation finishes, and the final
+transcript commits into the draft after the user stops recording.
 
-- `SpeechAnalyzer` + `SpeechTranscriber` with `.volatileResults`, iOS/visionOS 26+.
-- Volatile results go to a HUD; **finalized** results commit into the draft as
-  you speak. That split is what makes it feel real-time without the text churning.
-- `AnalysisContext.contextualStrings` seeded from the live shell snapshot —
-  project names, thread titles, branch names. This is the difference between
-  usable and unusable for code vocabulary.
-- Cancel rolls back only if the draft still ends with exactly what was appended,
-  so a mid-dictation edit is never eaten.
+Cancel rolls back only if the draft still ends with exactly what dictation
+appended, so a mid-dictation edit is never eaten. The composer continues to
+accept contextual vocabulary even though the current WhisperKit decoder does
+not yet turn it into prompt tokens.
 
 On visionOS dictation is tap once to start and tap again to stop; do not make the
 user hold a pinch for the whole utterance. The voice dock must occupy reserved
