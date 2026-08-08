@@ -3,6 +3,30 @@ import XCTest
 
 @MainActor
 final class WebSocketRPCRaceTests: XCTestCase {
+    func testUnknownMethodDefectExplainsServerVersionMismatch() async throws {
+        let client = WebSocketRPCClient(
+            connector: SequencedConnector(connections: [UnknownMethodConnection()]),
+            connectionWaitTimeout: .seconds(1),
+            endpointProvider: { URL(string: "wss://studio.example/ws")! }
+        )
+
+        do {
+            _ = try await client.request(
+                "orchestration.generateTaskSummary",
+                as: JSONValue.self
+            )
+            XCTFail("An unknown RPC method must fail.")
+        } catch let error as RPCError {
+            guard case let .remote(message) = error else {
+                await client.stop()
+                return XCTFail("Unexpected RPC error: \(error)")
+            }
+            XCTAssertTrue(message.contains("older T3 server"))
+            XCTAssertTrue(message.contains("orchestration.generateTaskSummary"))
+        }
+        await client.stop()
+    }
+
     func testResponseDeadlineStartsAfterConnectionAndSend() async throws {
         let connection = AutoReplyConnection()
         let connector = GatedConnector(connection: connection)
@@ -362,6 +386,54 @@ final class WebSocketRPCRaceTests: XCTestCase {
         XCTAssertTrue(observedInterrupt)
         await connection.releaseRequest()
         await client.stop()
+    }
+}
+
+private actor UnknownMethodConnection: WebSocketConnection {
+    private var queuedResponses: [Data] = []
+    private var receiveContinuation: CheckedContinuation<Data, Error>?
+
+    func send(_ data: Data) throws {
+        let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
+        guard case let .number(requestID) = request["id"] else { return }
+        let method = request["tag"]?.stringValue ?? "unknown"
+        let response = JSONValue.object([
+            "_tag": .string("Exit"),
+            "requestId": .number(requestID),
+            "exit": .object([
+                "_tag": .string("Failure"),
+                "cause": .array([
+                    .object([
+                        "_tag": .string("Die"),
+                        "defect": .string("Unknown request tag: \(method)"),
+                    ]),
+                ]),
+            ]),
+        ])
+        enqueue(try JSONEncoder.t3.encode(response))
+    }
+
+    func receive() async throws -> Data {
+        if !queuedResponses.isEmpty {
+            return queuedResponses.removeFirst()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            receiveContinuation = continuation
+        }
+    }
+
+    func close() {
+        receiveContinuation?.resume(throwing: CancellationError())
+        receiveContinuation = nil
+    }
+
+    private func enqueue(_ data: Data) {
+        if let receiveContinuation {
+            self.receiveContinuation = nil
+            receiveContinuation.resume(returning: data)
+        } else {
+            queuedResponses.append(data)
+        }
     }
 }
 

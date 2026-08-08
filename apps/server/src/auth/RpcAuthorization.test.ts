@@ -1,6 +1,7 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  ORCHESTRATION_WS_METHODS,
   AuthRelayReadScope,
   AuthRelayWriteScope,
   WS_METHODS,
@@ -26,6 +27,12 @@ describe("RPC authorization scopes", () => {
       AuthOrchestrationReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.subscribeBackgroundPolicy)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+
+  it("treats task summarization as a read of existing thread state", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_WS_METHODS.generateTaskSummary)).toBe(
       AuthOrchestrationReadScope,
     );
   });
