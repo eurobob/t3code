@@ -136,6 +136,7 @@ final class ThreadDetailModel {
         case terminalClosed
         case commandFailed(String)
         case malformedResponse
+        case lowQualityResponse
 
         var errorDescription: String? {
             switch self {
@@ -149,6 +150,8 @@ final class ThreadDetailModel {
                 "Claude Sonnet could not generate the task summary. \(detail)"
             case .malformedResponse:
                 "Claude Sonnet returned an unreadable task summary."
+            case .lowQualityResponse:
+                "Claude Sonnet did not return a useful task summary. Try regenerating it."
             }
         }
     }
@@ -369,12 +372,7 @@ final class ThreadDetailModel {
         defer { summaryIsLoading = false }
         summaryError = nil
         do {
-            let summary: GeneratedTaskSummary
-            do {
-                summary = try await appModel.generateTaskSummary(threadID: threadID)
-            } catch {
-                summary = try await generateTaskSummaryWithClaude(using: appModel)
-            }
+            let summary = try await generateTaskSummaryWithClaude(using: appModel)
             try Task.checkCancellation()
             guard isAgentWorking || summarySourceRevision == sourceRevision else { return }
             generatedSummary = summary
@@ -391,9 +389,9 @@ final class ThreadDetailModel {
         }
     }
 
-    /// Older T3 environments do not expose the summary RPC. Their existing
-    /// terminal transport can still run the user's Claude subscription without
-    /// adding a visible turn or mutating the task conversation.
+    /// Uses the environment's Claude subscription without adding a visible
+    /// turn or mutating the task conversation. Keeping this client-owned avoids
+    /// changing behavior with the T3 server version or configured utility model.
     private func generateTaskSummaryWithClaude(
         using appModel: AppModel
     ) async throws -> GeneratedTaskSummary {
@@ -402,48 +400,99 @@ final class ThreadDetailModel {
                   $0.id == thread.projectId
               }) else { throw SummaryFallbackError.threadUnavailable }
 
-        let prompt = taskSummaryPrompt(for: thread, projectTitle: project.title)
-        let encodedPrompt = Data(prompt.utf8).base64EncodedString()
-        let terminalID = "vision-summary-\(UUID().uuidString.lowercased())"
-        let marker = "__T3_VISION_SUMMARY_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
         let schema = #"{"type":"object","properties":{"asked":{"type":"string"},"done":{"type":"string"},"needsYou":{"type":"array","items":{"type":"string"}}},"required":["asked","done","needsYou"],"additionalProperties":false}"#
-        let command = """
-        stty -echo; t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -d 2>/dev/null)" || t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -D)"; t3_summary_output="$(printf %s "$t3_summary_prompt" | claude -p --model sonnet --tools '' --no-session-persistence --permission-mode dontAsk --output-format json --json-schema '\(schema)' 2>&1)"; t3_summary_status=$?; printf '\n\(marker)BEGIN\n%s\n\(marker)END:%s\n' "$t3_summary_output" "$t3_summary_status"; stty echo
-        """
+        var rejectedDraft: ClaudeSummaryEnvelope.Payload?
 
-        let rawResponse = try await runSummaryCommand(
-            command,
-            marker: marker,
-            terminalID: terminalID,
-            thread: thread,
-            project: project,
-            using: appModel
-        )
+        for _ in 0..<2 {
+            let prompt = taskSummaryPrompt(
+                for: thread,
+                projectTitle: project.title,
+                rejectedDraft: rejectedDraft
+            )
+            let encodedPrompt = Data(prompt.utf8).base64EncodedString()
+            let terminalID = "vision-summary-\(UUID().uuidString.lowercased())"
+            let marker = "__T3_VISION_SUMMARY_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+            let command = """
+            stty -echo; t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -d 2>/dev/null)" || t3_summary_prompt="$(printf %s '\(encodedPrompt)' | base64 -D)"; t3_summary_output="$(printf %s "$t3_summary_prompt" | claude -p --model sonnet --tools '' --no-session-persistence --permission-mode dontAsk --output-format json --json-schema '\(schema)' 2>&1)"; t3_summary_status=$?; printf '\n\(marker)BEGIN\n%s\n\(marker)END:%s\n' "$t3_summary_output" "$t3_summary_status"; stty echo
+            """
+
+            let rawResponse = try await runSummaryCommand(
+                command,
+                marker: marker,
+                terminalID: terminalID,
+                thread: thread,
+                project: project,
+                using: appModel
+            )
+            let payload = try decodeClaudeSummary(rawResponse)
+            if let summary = validatedTaskSummary(payload) {
+                return summary
+            }
+            rejectedDraft = payload
+        }
+
+        throw SummaryFallbackError.lowQualityResponse
+    }
+
+    private func decodeClaudeSummary(_ rawResponse: String) throws -> ClaudeSummaryEnvelope.Payload {
         let envelope = try JSONDecoder.t3.decode(
             ClaudeSummaryEnvelope.self,
             from: Data(rawResponse.utf8)
         )
-        let payload: ClaudeSummaryEnvelope.Payload
         if let structuredOutput = envelope.structuredOutput {
-            payload = structuredOutput
-        } else if let result = envelope.result,
-                  let data = result.data(using: .utf8),
-                  let decoded = try? JSONDecoder.t3.decode(
-                      ClaudeSummaryEnvelope.Payload.self,
-                      from: data
-                  ) {
-            payload = decoded
-        } else {
-            throw SummaryFallbackError.malformedResponse
+            return structuredOutput
         }
+        if let result = envelope.result,
+           let data = result.data(using: .utf8),
+           let decoded = try? JSONDecoder.t3.decode(
+               ClaudeSummaryEnvelope.Payload.self,
+               from: data
+           ) {
+            return decoded
+        }
+        throw SummaryFallbackError.malformedResponse
+    }
 
+    private func validatedTaskSummary(
+        _ payload: ClaudeSummaryEnvelope.Payload
+    ) -> GeneratedTaskSummary? {
+        let asked = payload.asked.trimmingCharacters(in: .whitespacesAndNewlines)
+        let done = payload.done.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAsked = normalizedSummaryField(asked)
+        let normalizedDone = normalizedSummaryField(done)
+        let placeholders: Set<String> = ["test", "testing", "none", "unknown", "n a", "na", "todo", "tbd"]
+        let processNarration = [
+            "agent is working on this now",
+            "agent is currently working",
+            "currently working on this",
+        ]
+
+        guard !normalizedAsked.isEmpty,
+              !normalizedDone.isEmpty,
+              normalizedAsked != normalizedDone,
+              !placeholders.contains(normalizedAsked),
+              !placeholders.contains(normalizedDone),
+              !processNarration.contains(where: { normalizedDone.contains($0) }) else { return nil }
+
+        let needsYou = payload.needsYou
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(5)
         return GeneratedTaskSummary(
-            asked: payload.asked,
-            done: payload.done,
-            needsYou: payload.needsYou,
+            asked: asked,
+            done: done,
+            needsYou: Array(needsYou),
             modelSelection: ModelSelection(instanceId: "claude", model: "sonnet"),
             generatedAt: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    private func normalizedSummaryField(_ value: String) -> String {
+        value
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func runSummaryCommand(
@@ -551,7 +600,8 @@ final class ThreadDetailModel {
 
     private func taskSummaryPrompt(
         for thread: OrchestrationThread,
-        projectTitle: String
+        projectTitle: String,
+        rejectedDraft: ClaudeSummaryEnvelope.Payload?
     ) -> String {
         var sections = [
             "Project: \(projectTitle)",
@@ -562,8 +612,17 @@ final class ThreadDetailModel {
                 + "narration such as 'the agent is working on this now'. If nothing is complete, "
                 + "say so plainly and identify the current state. 'needsYou' must contain only "
                 + "specific decisions or actions the user must take; return an empty array when "
-                + "none are required. Do not invent implementation results.",
+                + "none are required. A vague or test-only request is not completed work: explain "
+                + "that no actionable task was specified and that no substantive work was done. "
+                + "Do not invent implementation results.",
         ]
+        if let rejectedDraft {
+            sections.append(
+                "A previous draft was rejected as placeholder or duplicated content. Replace it "
+                    + "with a specific grounded brief. Rejected asked: \(rejectedDraft.asked)\n"
+                    + "Rejected done: \(rejectedDraft.done)"
+            )
+        }
         let messages = thread.messages.suffix(40).map {
             "\($0.role.uppercased()): \(String($0.text.prefix(2_000)))"
         }
@@ -584,7 +643,7 @@ final class ThreadDetailModel {
     }
 
     private func taskSummaryCacheKey(environmentID: String?) -> String {
-        "codes.t3.vision.task-summary.\(environmentID ?? "unknown").\(threadID)"
+        "codes.t3.vision.task-summary.v2.\(environmentID ?? "unknown").\(threadID)"
     }
 
     func submit(using appModel: AppModel) {
