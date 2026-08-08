@@ -335,6 +335,13 @@ final class ThreadDetailModel {
 
     func start(using appModel: AppModel) async {
         guard eventsTask == nil else { return }
+        if let cached = appModel.cachedThreadSnapshot(id: threadID) {
+            apply(cached)
+            loadState = .loaded
+            startEvents(after: cached.snapshotSequence, using: appModel)
+            return
+        }
+
         loadState = .loading
         do {
             let snapshot = try await appModel.threadSnapshot(id: threadID)
@@ -1016,6 +1023,7 @@ final class ThreadDetailModel {
                     case .synchronized:
                         liveError = nil
                     case let .snapshot(snapshot):
+                        appModel.storeThreadSnapshot(snapshot)
                         apply(snapshot)
                     case .event:
                         scheduleRefresh(using: appModel)
@@ -1211,6 +1219,7 @@ final class ThreadDetailModel {
             case .synchronized:
                 snapshot = nil
             case let .snapshot(replacement):
+                appModel.storeThreadSnapshot(replacement)
                 snapshot = replacement
             case .event:
                 snapshot = try await appModel.threadSnapshot(id: threadID)

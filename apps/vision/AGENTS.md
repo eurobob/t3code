@@ -143,6 +143,10 @@ visibility Boolean, so it appears only while the transcript is actually away
 from the bottom; content and voice-dock growth do not expose it during follow.
 Programmatic following no longer animates across long conversations, avoiding
 the apparent high-speed scroll caused by new events fighting manual movement.
+Recently viewed conversations are kept in a bounded, environment-scoped memory
+cache. Returning to a task renders its transcript immediately and resumes the
+thread stream from the cached sequence, while first visits still load an
+authoritative snapshot.
 
 Every task shows one T3-owned Deploy action in the header; repositories do not
 configure it and do not need a deploy entry in `t3.json`. The action runs from
