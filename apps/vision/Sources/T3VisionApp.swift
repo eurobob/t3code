@@ -13,6 +13,7 @@ struct T3VisionApp: App {
             RootView()
                 .environment(model)
                 .task { await model.restore() }
+                .task { await VisionWhisperKitService.shared.prepareIfNeeded() }
         }
         .defaultSize(width: 900, height: 960)
 

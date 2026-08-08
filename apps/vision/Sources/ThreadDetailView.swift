@@ -238,11 +238,6 @@ final class ThreadDetailModel {
         dictationController.onError = { [weak self] message in
             self?.finishDictationWithError(message)
         }
-        dictationController.onPreparationState = { [weak self] state in
-            guard let self, dictationActive,
-                  case .preparing = dictationPhase else { return }
-            dictationPhase = .preparing(state.label)
-        }
     }
 
     var thread: OrchestrationThread? { detail?.thread }
@@ -779,12 +774,16 @@ final class ThreadDetailModel {
             return
         }
         guard !dictationActive else { return }
+        guard VisionWhisperKitService.shared.isReady else {
+            dictationError = VisionDictationError.modelUnavailable.localizedDescription
+            return
+        }
 
         dictationActive = true
         committedDictation = ""
         volatileDictation = ""
         dictationError = nil
-        dictationPhase = .preparing("Checking WhisperKit model cache…")
+        dictationPhase = .preparing("Starting microphone…")
         dictationTask = Task { [weak self] in
             guard let self else { return }
             let granted = await VisionDictationController.requestPermission()
@@ -1380,6 +1379,7 @@ struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
     @AppStorage("vision.tasks.showsSummaryPanel") private var showsSummaryPanel = false
     @State private var model: ThreadDetailModel
+    @State private var dictationService = VisionWhisperKitService.shared
     @State private var draftEditorMode = DraftEditorMode.hidden
     @State private var prefersHardwareEditor = false
     @State private var dictationBaseline = ""
@@ -1410,6 +1410,7 @@ struct ThreadDetailView: View {
         }
         .navigationTitle("")
         .task { await model.start(using: appModel) }
+        .task { await dictationService.prepareIfNeeded() }
         .onChange(of: model.isDictating) {
             if !model.isDictating, model.draft != dictationBaseline {
                 prefersHardwareEditor = true
@@ -1817,6 +1818,31 @@ struct ThreadDetailView: View {
                     .tint(.red)
                     .foregroundStyle(.white)
                 }
+            } else if let label = dictationService.state.label {
+                HStack(spacing: 8) {
+                    if dictationService.state.isPreparing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    Text(label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(
+                            dictationService.state.isFailure
+                                ? Color.red
+                                : Color.secondary
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if dictationService.state.isFailure {
+                        Button("Retry") {
+                            Task { await dictationService.retry() }
+                        }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.bordered)
+                    }
+                }
             } else if let notice = model.actionNotice {
                 Text(notice)
                     .font(.caption)
@@ -1942,37 +1968,56 @@ struct ThreadDetailView: View {
         }
     }
 
+    @ViewBuilder
     private var dictationButton: some View {
-        Button {
-            if model.isDictating {
-                model.finishDictation()
-            } else {
-                dictationBaseline = model.draft
-                draftEditorMode = .hidden
-                model.beginDictation(vocabulary: appModel.dictationVocabulary)
-            }
-        } label: {
-            Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
-                .font(.system(size: 30, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 76, height: 76)
-                .background(microphoneColor, in: Circle())
-                .overlay {
-                    Circle()
-                        .stroke(Color.white.opacity(0.72), lineWidth: 2)
-                        .padding(5)
+        if model.isDictating || dictationService.isReady {
+            Button {
+                if model.isDictating {
+                    model.finishDictation()
+                } else {
+                    dictationBaseline = model.draft
+                    draftEditorMode = .hidden
+                    model.beginDictation(vocabulary: appModel.dictationVocabulary)
                 }
-                .contentShape(.interaction, Circle())
-                .contentShape(.hoverEffect, Circle())
+            } label: {
+                Image(systemName: model.isDictating ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 76, height: 76)
+                    .background(microphoneColor, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.72), lineWidth: 2)
+                            .padding(5)
+                    }
+                    .contentShape(.interaction, Circle())
+                    .contentShape(.hoverEffect, Circle())
+            }
+            .buttonStyle(.plain)
+            .hoverEffect(.lift)
+            .onHover { microphoneHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: microphoneHovered)
+            .animation(.easeOut(duration: 0.12), value: model.isDictating)
+            .opacity(model.isBusy ? 0.4 : 1)
+            .disabled(model.isBusy)
+            .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
+        } else {
+            ZStack {
+                Circle()
+                    .fill(Color.secondary.opacity(0.18))
+                if dictationService.state.isPreparing {
+                    ProgressView()
+                        .controlSize(.large)
+                } else {
+                    Image(systemName: "mic.slash.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 76, height: 76)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Dictation unavailable")
         }
-        .buttonStyle(.plain)
-        .hoverEffect(.lift)
-        .onHover { microphoneHovered = $0 }
-        .animation(.easeOut(duration: 0.12), value: microphoneHovered)
-        .animation(.easeOut(duration: 0.12), value: model.isDictating)
-        .opacity(model.isBusy ? 0.4 : 1)
-        .disabled(model.isBusy)
-        .accessibilityLabel(model.isDictating ? "Stop dictation" : "Start dictation")
     }
 
     private var microphoneColor: Color {

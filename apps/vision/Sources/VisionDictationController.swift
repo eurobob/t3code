@@ -1,33 +1,61 @@
 import AVFoundation
 import Foundation
+import Observation
 import OSLog
 import WhisperKit
 
 enum VisionDictationError: LocalizedError {
     case microphonePermissionDenied
+    case modelUnavailable
 
     var errorDescription: String? {
         switch self {
         case .microphonePermissionDenied:
             "T3 Vision needs microphone access to dictate."
+        case .modelUnavailable:
+            "WhisperKit is not ready yet."
         }
     }
 }
 
 enum VisionDictationPreparationState: Equatable, Sendable {
+    case notStarted
     case checkingCache
     case downloading(Int)
     case loading
+    case loadingSlowly
+    case ready
+    case failed(String)
 
-    var label: String {
+    var label: String? {
         switch self {
+        case .notStarted:
+            "WhisperKit has not started loading."
         case .checkingCache:
             "Checking WhisperKit model cache…"
         case let .downloading(percentage):
             "Downloading WhisperKit model… \(percentage)%"
         case .loading:
             "Loading WhisperKit…"
+        case .loadingSlowly:
+            "WhisperKit is taking longer than expected to load. Dictation will become available when it is ready."
+        case .ready:
+            nil
+        case let .failed(message):
+            "WhisperKit is unavailable: \(message)"
         }
+    }
+
+    var isPreparing: Bool {
+        switch self {
+        case .checkingCache, .downloading, .loading, .loadingSlowly: true
+        case .notStarted, .ready, .failed: false
+        }
+    }
+
+    var isFailure: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }
 
@@ -46,8 +74,9 @@ private final class VisionWhisperKitProgressReporter: @unchecked Sendable {
 }
 
 @MainActor
-private final class VisionWhisperKitPipeline {
-    static let shared = VisionWhisperKitPipeline()
+@Observable
+final class VisionWhisperKitService {
+    static let shared = VisionWhisperKitService()
     static let model = "large-v3-v20240930_626MB"
     private static var cachedModelFolderName: String { "openai_whisper-\(model)" }
     private static let logger = Logger(
@@ -55,17 +84,39 @@ private final class VisionWhisperKitPipeline {
         category: "Dictation"
     )
 
+    private(set) var state = VisionDictationPreparationState.notStarted
+    @ObservationIgnored
     private var whisperKit: WhisperKit?
-    private var preparationTask: Task<WhisperKit, Error>?
+    @ObservationIgnored
+    private var preparationTask: Task<Void, Never>?
 
-    func prepare(
-        onState: @escaping @MainActor @Sendable (VisionDictationPreparationState) -> Void
-    ) async throws {
-        _ = try await preparedWhisperKit(onState: onState)
+    var isReady: Bool { state == .ready && whisperKit != nil }
+
+    func prepareIfNeeded() async {
+        if isReady { return }
+        if let preparationTask {
+            await preparationTask.value
+            return
+        }
+
+        let preparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await runPreparation()
+        }
+        self.preparationTask = preparationTask
+        await preparationTask.value
+        self.preparationTask = nil
+    }
+
+    func retry() async {
+        guard state.isFailure else { return }
+        await prepareIfNeeded()
     }
 
     func transcribe(audioURL: URL) async throws -> String {
-        let whisperKit = try await preparedWhisperKit(onState: { _ in })
+        guard let whisperKit, state == .ready else {
+            throw VisionDictationError.modelUnavailable
+        }
         let results = try await whisperKit.transcribe(
             audioPath: audioURL.path,
             decodeOptions: Self.decodingOptions
@@ -74,7 +125,9 @@ private final class VisionWhisperKitPipeline {
     }
 
     func transcribe(audioSamples: [Float]) async throws -> String {
-        let whisperKit = try await preparedWhisperKit(onState: { _ in })
+        guard let whisperKit, state == .ready else {
+            throw VisionDictationError.modelUnavailable
+        }
         let results = try await whisperKit.transcribe(
             audioArray: audioSamples,
             decodeOptions: Self.decodingOptions
@@ -96,17 +149,10 @@ private final class VisionWhisperKitPipeline {
             .joined(separator: " ")
     }
 
-    private func preparedWhisperKit(
-        onState: @escaping @MainActor @Sendable (VisionDictationPreparationState) -> Void
-    ) async throws -> WhisperKit {
-        if let whisperKit { return whisperKit }
-        if let preparationTask {
-            return try await preparationTask.value
-        }
-
-        let preparationTask = Task { @MainActor in
-            onState(.checkingCache)
-            Self.logger.notice("Checking the local WhisperKit model cache")
+    private func runPreparation() async {
+        state = .checkingCache
+        Self.logger.notice("Checking the local WhisperKit model cache")
+        do {
             let modelFolder: URL
             if let cachedModelFolder = Self.cachedModelFolder() {
                 modelFolder = cachedModelFolder
@@ -119,16 +165,29 @@ private final class VisionWhisperKitPipeline {
                         guard let percentage = progressReporter.nextPercentage(from: progress) else {
                             return
                         }
-                        Task { @MainActor in
-                            onState(.downloading(percentage))
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            switch state {
+                            case .checkingCache, .downloading:
+                                state = .downloading(percentage)
+                            case .notStarted, .loading, .loadingSlowly, .ready, .failed:
+                                return
+                            }
                             Self.logger.notice("Downloading the WhisperKit model: \(percentage)%")
                         }
                     }
                 )
             }
 
-            onState(.loading)
+            state = .loading
             Self.logger.notice("Loading the WhisperKit model")
+            let slowLoadingTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, self?.state == .loading else { return }
+                self?.state = .loadingSlowly
+            }
+            defer { slowLoadingTask.cancel() }
+
             let whisperKit = try await WhisperKit(WhisperKitConfig(
                 modelFolder: modelFolder.path,
                 verbose: false,
@@ -137,22 +196,14 @@ private final class VisionWhisperKitPipeline {
                 download: false
             ))
             try await whisperKit.loadModels()
-            Self.logger.notice("WhisperKit is ready for dictation")
-            return whisperKit
-        }
-        self.preparationTask = preparationTask
-
-        do {
-            let whisperKit = try await preparationTask.value
             self.whisperKit = whisperKit
-            self.preparationTask = nil
-            return whisperKit
+            state = .ready
+            Self.logger.notice("WhisperKit is ready for dictation")
         } catch {
-            self.preparationTask = nil
+            state = .failed(error.localizedDescription)
             Self.logger.error(
                 "WhisperKit preparation failed: \(error.localizedDescription, privacy: .public)"
             )
-            throw error
         }
     }
 
@@ -192,9 +243,6 @@ final class VisionDictationController {
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
     var onFinalized: (@MainActor @Sendable (String) -> Void)?
     var onError: (@MainActor @Sendable (String) -> Void)?
-    var onPreparationState: (
-        @MainActor @Sendable (VisionDictationPreparationState) -> Void
-    )?
 
     static func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -206,12 +254,12 @@ final class VisionDictationController {
 
     func start(contextualStrings: [String]) async throws {
         guard !isRunning else { return }
+        guard VisionWhisperKitService.shared.isReady else {
+            throw VisionDictationError.modelUnavailable
+        }
         // WhisperKit does not consume SpeechAnalyzer contextual strings. Keep
         // the parameter so the composer API can add prompt tokens later.
         _ = contextualStrings
-        try await VisionWhisperKitPipeline.shared.prepare { [weak self] state in
-            self?.onPreparationState?(state)
-        }
         try Task.checkCancellation()
 
         let (bufferSignals, continuation) = AsyncStream.makeStream(
@@ -248,7 +296,7 @@ final class VisionDictationController {
         await stopLiveUpdates()
         defer { try? FileManager.default.removeItem(at: recording.fileURL) }
         do {
-            let text = try await VisionWhisperKitPipeline.shared.transcribe(
+            let text = try await VisionWhisperKitService.shared.transcribe(
                 audioURL: recording.fileURL
             )
             if !text.isEmpty { onFinalized?(text) }
@@ -284,7 +332,7 @@ final class VisionDictationController {
             lastTranscribedSampleCount = samples.count
 
             do {
-                let text = try await VisionWhisperKitPipeline.shared.transcribe(
+                let text = try await VisionWhisperKitService.shared.transcribe(
                     audioSamples: samples
                 )
                 guard !Task.isCancelled, isRunning else { return }
