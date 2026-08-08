@@ -328,7 +328,8 @@ struct ThreadListView: View {
                 }
                 Divider()
                 Button {
-                    openWindow(id: "speech-lab")
+                    SpeechLabLog.logger.notice("Opening Speech Lab from the task list")
+                    openWindow(id: "speech-lab", value: "primary")
                 } label: {
                     Label("Speech Lab", systemImage: "waveform.and.mic")
                 }

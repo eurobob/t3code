@@ -30,7 +30,7 @@ struct T3VisionApp: App {
         }
         .defaultSize(width: 820, height: 780)
 
-        WindowGroup(id: "speech-lab") {
+        WindowGroup(id: "speech-lab", for: String.self) { _ in
             SpeechComparisonLabView()
                 .environment(model)
         }

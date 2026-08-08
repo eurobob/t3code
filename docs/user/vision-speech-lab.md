@@ -13,6 +13,10 @@ enter the server's `/inference` address, and select **Record Sample**. Select
 **Stop & Compare** when you finish speaking; recording also stops automatically
 after 60 seconds.
 
+The window reports model-cache checking, download percentage, Core ML
+optimization, and loading as separate stages. The first download is roughly
+626 MB; later launches reuse the device cache.
+
 Both transcript cards report end-to-end transcription time. Model download and
 preparation are excluded from that time. The comparison uses automatic language
 detection, temperature zero, no contextual prompt, and one shared 16 kHz mono

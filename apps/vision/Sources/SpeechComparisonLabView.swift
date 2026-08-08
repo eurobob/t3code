@@ -1,8 +1,16 @@
 import AVFoundation
 import Foundation
 import Observation
+import OSLog
 import SwiftUI
 import WhisperKit
+
+enum SpeechLabLog {
+    static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
+        category: "SpeechLab"
+    )
+}
 
 private enum SpeechLabError: LocalizedError {
     case invalidAudioFormat
@@ -302,6 +310,20 @@ private enum SpeechLabServer {
     }
 }
 
+private final class SpeechLabDownloadProgressReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastPercentage = -1
+
+    func nextPercentage(from progress: Progress) -> Int? {
+        let percentage = min(100, max(0, Int(progress.fractionCompleted * 100)))
+        lock.lock()
+        defer { lock.unlock() }
+        guard percentage > lastPercentage else { return nil }
+        lastPercentage = percentage
+        return percentage
+    }
+}
+
 @MainActor
 @Observable
 private final class SpeechComparisonLabModel {
@@ -310,7 +332,10 @@ private final class SpeechComparisonLabModel {
 
     enum PreparationState: Equatable {
         case notStarted
-        case preparing
+        case checkingCache
+        case downloading(Int)
+        case optimizing
+        case loading
         case ready
         case failed(String)
     }
@@ -347,25 +372,63 @@ private final class SpeechComparisonLabModel {
     var errorMessage: String?
 
     @ObservationIgnored
-    private let recorder = SpeechLabRecorder()
+    private var recorder: SpeechLabRecorder?
     @ObservationIgnored
     private var whisperKit: WhisperKit?
     @ObservationIgnored
     private var automaticStopTask: Task<Void, Never>?
 
     func prepareOnDeviceModel() async {
-        guard preparationState != .preparing, preparationState != .ready else { return }
-        preparationState = .preparing
+        switch preparationState {
+        case .checkingCache, .downloading, .optimizing, .loading, .ready:
+            return
+        case .notStarted, .failed:
+            break
+        }
+
+        preparationState = .checkingCache
+        errorMessage = nil
+        SpeechLabLog.logger.notice("Checking the WhisperKit model cache")
         do {
-            whisperKit = try await WhisperKit(WhisperKitConfig(
-                model: Self.whisperKitModel,
+            let progressReporter = SpeechLabDownloadProgressReporter()
+            let modelFolder = try await WhisperKit.download(
+                variant: Self.whisperKitModel,
+                progressCallback: { [weak self] progress in
+                    guard let percentage = progressReporter.nextPercentage(from: progress) else {
+                        return
+                    }
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        switch self.preparationState {
+                        case .checkingCache, .downloading:
+                            self.preparationState = .downloading(percentage)
+                        case .notStarted, .optimizing, .loading, .ready, .failed:
+                            break
+                        }
+                    }
+                }
+            )
+
+            preparationState = .optimizing
+            SpeechLabLog.logger.notice("Optimizing the WhisperKit model")
+            let whisperKit = try await WhisperKit(WhisperKitConfig(
+                modelFolder: modelFolder.path,
                 verbose: false,
-                prewarm: true,
-                load: true
+                prewarm: false,
+                load: false,
+                download: false
             ))
+            try await whisperKit.prewarmModels()
+
+            preparationState = .loading
+            SpeechLabLog.logger.notice("Loading the WhisperKit model")
+            try await whisperKit.loadModels()
+            self.whisperKit = whisperKit
             preparationState = .ready
+            SpeechLabLog.logger.notice("WhisperKit is ready")
         } catch {
             preparationState = .failed(error.localizedDescription)
+            SpeechLabLog.logger.error("WhisperKit setup failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -382,6 +445,8 @@ private final class SpeechComparisonLabModel {
         }
 
         do {
+            let recorder = recorder ?? SpeechLabRecorder()
+            self.recorder = recorder
             try recorder.start()
             recordedDuration = nil
             onDeviceResult = EngineResult()
@@ -405,6 +470,7 @@ private final class SpeechComparisonLabModel {
         automaticStopTask = nil
 
         do {
+            guard let recorder else { throw SpeechLabError.noAudioCaptured }
             let recording = try recorder.stop()
             defer { try? FileManager.default.removeItem(at: recording.fileURL) }
             guard let endpoint = SpeechLabServer.validatedEndpoint(serverEndpoint) else {
@@ -456,7 +522,7 @@ private final class SpeechComparisonLabModel {
         guard capturePhase == .recording else { return }
         automaticStopTask?.cancel()
         automaticStopTask = nil
-        recorder.cancel()
+        recorder?.cancel()
         capturePhase = .idle
     }
 
@@ -551,10 +617,15 @@ struct SpeechComparisonLabView: View {
         }
         .padding(24)
         .navigationTitle("Speech Lab")
+        .onAppear {
+            SpeechLabLog.logger.notice("Speech Lab window appeared")
+        }
         .task {
             if serverEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 serverEndpoint = suggestedServerEndpoint
             }
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
             await model.prepareOnDeviceModel()
         }
         .onDisappear {
@@ -578,39 +649,88 @@ struct SpeechComparisonLabView: View {
     }
 
     private var configuration: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox {
+                preparationStatus
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } label: {
+                Label("On-device model", systemImage: "arrow.down.circle")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Server endpoint")
+                    .font(.headline)
                 TextField("http://server:8085/inference", text: $serverEndpoint)
                     .textFieldStyle(.roundedBorder)
                     .disabled(model.capturePhase != .idle)
-                preparationStatus
+                Text("For plain HTTP, use the server's numeric LAN or Tailscale address. Otherwise use an authenticated HTTPS proxy. The endpoint is saved only on this device.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Text("For plain HTTP, use the server's numeric LAN or Tailscale address. Otherwise use an authenticated HTTPS proxy. The endpoint is saved only on this device.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
     @ViewBuilder
     private var preparationStatus: some View {
         switch model.preparationState {
-        case .notStarted, .preparing:
+        case .notStarted:
+            Text("Opening model setup…")
+                .foregroundStyle(.secondary)
+        case .checkingCache:
             HStack(spacing: 8) {
                 ProgressView()
-                Text("Preparing WhisperKit…")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Checking model cache…")
+                    Text("The model is downloaded only when it is not already on this Vision Pro.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .frame(minWidth: 210, alignment: .leading)
+        case let .downloading(percentage):
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Downloading WhisperKit model…")
+                    Spacer()
+                    Text("\(percentage)%")
+                        .monospacedDigit()
+                }
+                ProgressView(value: Double(percentage), total: 100)
+                Text("Approximately 626 MB · stays on this device")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .optimizing:
+            HStack(spacing: 8) {
+                ProgressView()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Optimizing for this Vision Pro…")
+                    Text("Core ML specialization can take a few minutes on the first run.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .loading:
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("Loading the on-device model…")
+            }
         case .ready:
             Label("WhisperKit ready", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-                .frame(minWidth: 210, alignment: .leading)
         case let .failed(message):
-            Button {
-                Task { await model.prepareOnDeviceModel() }
-            } label: {
-                Label("Retry model setup", systemImage: "arrow.clockwise")
+            VStack(alignment: .leading, spacing: 8) {
+                Label("WhisperKit setup failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button {
+                    Task { await model.prepareOnDeviceModel() }
+                } label: {
+                    Label("Retry model setup", systemImage: "arrow.clockwise")
+                }
             }
-            .help(message)
         }
     }
 
