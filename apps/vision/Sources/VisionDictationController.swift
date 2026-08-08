@@ -77,7 +77,7 @@ private final class VisionWhisperKitProgressReporter: @unchecked Sendable {
 @Observable
 final class VisionWhisperKitService {
     static let shared = VisionWhisperKitService()
-    static let model = "large-v3-v20240930_626MB"
+    static let model = "base"
     private static var cachedModelFolderName: String { "openai_whisper-\(model)" }
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.t3tools.t3code.vision",
@@ -113,34 +113,52 @@ final class VisionWhisperKitService {
         await prepareIfNeeded()
     }
 
-    func transcribe(audioURL: URL) async throws -> String {
+    func promptTokens(contextualStrings: [String]) -> [Int]? {
+        guard let tokenizer = whisperKit?.tokenizer else { return nil }
+        let domainVocabulary = [
+            "T3 Code", "visionOS", "WhisperKit", "Codex", "Claude",
+            "OpenCode", "Tailscale",
+        ]
+        let vocabulary = (domainVocabulary + contextualStrings)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !vocabulary.isEmpty else { return nil }
+        return tokenizer
+            .encode(text: " " + vocabulary.joined(separator: ", "))
+            .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+    }
+
+    func transcribe(audioURL: URL, promptTokens: [Int]?) async throws -> String {
         guard let whisperKit, state == .ready else {
             throw VisionDictationError.modelUnavailable
         }
         let results = try await whisperKit.transcribe(
             audioPath: audioURL.path,
-            decodeOptions: Self.decodingOptions
+            decodeOptions: Self.decodingOptions(promptTokens: promptTokens)
         )
         return Self.joinedText(from: results)
     }
 
-    func transcribe(audioSamples: [Float]) async throws -> String {
+    func transcribe(audioSamples: [Float], promptTokens: [Int]?) async throws -> String {
         guard let whisperKit, state == .ready else {
             throw VisionDictationError.modelUnavailable
         }
         let results = try await whisperKit.transcribe(
             audioArray: audioSamples,
-            decodeOptions: Self.decodingOptions
+            decodeOptions: Self.decodingOptions(promptTokens: promptTokens)
         )
         return Self.joinedText(from: results)
     }
 
-    private static let decodingOptions = DecodingOptions(
-        language: nil,
-        temperature: 0,
-        detectLanguage: true,
-        withoutTimestamps: true
-    )
+    private static func decodingOptions(promptTokens: [Int]?) -> DecodingOptions {
+        DecodingOptions(
+            language: nil,
+            temperature: 0,
+            detectLanguage: true,
+            withoutTimestamps: true,
+            promptTokens: promptTokens
+        )
+    }
 
     private static func joinedText(from results: [TranscriptionResult]) -> String {
         return results
@@ -238,6 +256,7 @@ final class VisionDictationController {
     private var isRunning = false
     private var liveTranscriptionTask: Task<Void, Never>?
     private var bufferContinuation: AsyncStream<Void>.Continuation?
+    private var promptTokens: [Int]?
 
     // Partial text is presentation-only; the full-buffer pass is finalized.
     var onVolatile: (@MainActor @Sendable (String) -> Void)?
@@ -257,9 +276,10 @@ final class VisionDictationController {
         guard VisionWhisperKitService.shared.isReady else {
             throw VisionDictationError.modelUnavailable
         }
-        // WhisperKit does not consume SpeechAnalyzer contextual strings. Keep
-        // the parameter so the composer API can add prompt tokens later.
-        _ = contextualStrings
+        // Keep domain and live shell vocabulary stable across partial passes.
+        promptTokens = VisionWhisperKitService.shared.promptTokens(
+            contextualStrings: contextualStrings
+        )
         try Task.checkCancellation()
 
         let (bufferSignals, continuation) = AsyncStream.makeStream(
@@ -272,6 +292,7 @@ final class VisionDictationController {
             }
         } catch {
             continuation.finish()
+            promptTokens = nil
             throw error
         }
         bufferContinuation = continuation
@@ -284,6 +305,7 @@ final class VisionDictationController {
     func finish() async {
         guard isRunning else { return }
         isRunning = false
+        defer { promptTokens = nil }
         let recording: SpeechLabRecording
         do {
             recording = try recorder.stop()
@@ -297,7 +319,8 @@ final class VisionDictationController {
         defer { try? FileManager.default.removeItem(at: recording.fileURL) }
         do {
             let text = try await VisionWhisperKitService.shared.transcribe(
-                audioURL: recording.fileURL
+                audioURL: recording.fileURL,
+                promptTokens: promptTokens
             )
             if !text.isEmpty { onFinalized?(text) }
         } catch is CancellationError {
@@ -311,6 +334,7 @@ final class VisionDictationController {
         if isRunning { recorder.cancel() }
         isRunning = false
         await stopLiveUpdates()
+        promptTokens = nil
     }
 
     private func stopLiveUpdates() async {
@@ -333,7 +357,8 @@ final class VisionDictationController {
 
             do {
                 let text = try await VisionWhisperKitService.shared.transcribe(
-                    audioSamples: samples
+                    audioSamples: samples,
+                    promptTokens: promptTokens
                 )
                 guard !Task.isCancelled, isRunning else { return }
                 onVolatile?(text)
