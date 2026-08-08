@@ -125,10 +125,13 @@ final class VisionDictationController {
 
     private func configureAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
+        // T3 Vision can move to the background when another app opens an
+        // immersive space. A mixable input/output session keeps that app's
+        // audio audible while this already-active recording continues.
         try session.setCategory(
-            .record,
+            .playAndRecord,
             mode: .default,
-            options: [.duckOthers, .allowBluetoothHFP]
+            options: [.mixWithOthers, .allowBluetoothHFP]
         )
         try session.setActive(true)
     }

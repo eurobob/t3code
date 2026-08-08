@@ -107,6 +107,9 @@ The microphone is an unlabeled circular target with neutral, hover, and recordin
 colors. Selecting another task assigns the detail view that thread's identity so
 SwiftUI cannot retain the previous thread model. Auto-scroll targets a spacer
 after the final message to preserve breathing room above the voice dock.
+An active dictation session continues when visionOS hides T3 Vision for another
+app's immersive space, and its mixable audio session leaves that app's audio
+audible while feedback is recorded.
 Connection failures preserve the saved environment and Keychain credential;
 the failure screen identifies the saved host and retries it directly instead
 of forcing another pairing exchange.
