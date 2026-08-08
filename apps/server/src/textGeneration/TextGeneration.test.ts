@@ -21,6 +21,7 @@ const makeStubTextGeneration = (
     generatePrContent: () => Effect.die("generatePrContent stub not configured for this test"),
     generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
     generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
+    generateTaskSummary: () => Effect.die("generateTaskSummary stub not configured for this test"),
     ...overrides,
   });
 
@@ -116,6 +117,34 @@ describe("makeTextGenerationFromRegistry", () => {
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
       }
+    }),
+  );
+
+  it.effect("routes task summaries through the selected provider instance", () =>
+    Effect.gen(function* () {
+      const selected = makeStubInstance(
+        ProviderInstanceId.make("claude_work"),
+        makeStubTextGeneration({
+          generateTaskSummary: () =>
+            Effect.succeed({
+              asked: "Build a concise task view.",
+              done: "Added model-generated summaries.",
+              needsYou: [],
+            }),
+        }),
+      );
+      const tg = TextGeneration.makeTextGenerationFromRegistry(makeStubRegistry([selected]));
+
+      const result = yield* tg.generateTaskSummary({
+        cwd: process.cwd(),
+        context: "USER: Build a concise task view.",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claude_work"),
+          "claude-sonnet-4-5",
+        ),
+      });
+
+      expect(result.done).toBe("Added model-generated summaries.");
     }),
   );
 });

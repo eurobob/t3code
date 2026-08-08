@@ -154,6 +154,7 @@ public actor WebSocketRPCClient {
 
     private struct UnaryRequest {
         let envelope: RPCRequestEnvelope
+        let responseTimeout: Duration
         var sent: Bool
         var connectionWaitTask: Task<Void, Never>?
         var sendDeadlineTask: Task<Void, Never>?
@@ -302,17 +303,27 @@ public actor WebSocketRPCClient {
     public func request<Result: Decodable & Sendable>(
         _ tag: String,
         payload: JSONValue = .object([:]),
+        responseTimeout: Duration? = nil,
         as type: Result.Type
     ) async throws -> Result {
-        let raw = try await requestRaw(tag, payload: payload)
+        let raw = try await requestRaw(
+            tag,
+            payload: payload,
+            responseTimeout: responseTimeout
+        )
         return try raw.decode(type)
     }
 
     public func request(
         _ tag: String,
-        payload: JSONValue = .object([:])
+        payload: JSONValue = .object([:]),
+        responseTimeout: Duration? = nil
     ) async throws {
-        _ = try await requestRaw(tag, payload: payload)
+        _ = try await requestRaw(
+            tag,
+            payload: payload,
+            responseTimeout: responseTimeout
+        )
     }
 
     public func subscribe<Value: Decodable & Sendable>(
@@ -353,9 +364,14 @@ public actor WebSocketRPCClient {
         }
     }
 
-    private func requestRaw(_ tag: String, payload: JSONValue) async throws -> JSONValue {
+    private func requestRaw(
+        _ tag: String,
+        payload: JSONValue,
+        responseTimeout: Duration?
+    ) async throws -> JSONValue {
         start()
         let id = allocateRequestID()
+        let requestResponseTimeout = responseTimeout ?? self.responseTimeout
         let envelope = RPCRequestEnvelope(
             id: id,
             tag: tag,
@@ -372,6 +388,7 @@ public actor WebSocketRPCClient {
                 }
                 unary[id] = UnaryRequest(
                     envelope: envelope,
+                    responseTimeout: requestResponseTimeout,
                     sent: false,
                     connectionWaitTask: nil,
                     sendDeadlineTask: nil,
@@ -693,7 +710,7 @@ public actor WebSocketRPCClient {
         request.connectionWaitTask = nil
         request.sendDeadlineTask?.cancel()
         request.sendDeadlineTask = nil
-        let responseTimeout = responseTimeout
+        let responseTimeout = request.responseTimeout
         request.responseDeadlineTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: responseTimeout)
