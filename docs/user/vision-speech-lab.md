@@ -7,8 +7,8 @@ with two engines:
   Pro.
 - A configurable `whisper.cpp` Large v3 Turbo server.
 
-Open **Task List Options**, then select **Speech Lab**. The lab opens in its own
-window. Wait for WhisperKit to finish downloading and preparing its model,
+Select **Speech Lab** in the task-list toolbar. The lab opens in its own window.
+Wait for WhisperKit to finish downloading and preparing its model,
 enter the server's `/inference` address, and select **Record Sample**. Select
 **Stop & Compare** when you finish speaking; recording also stops automatically
 after 60 seconds.

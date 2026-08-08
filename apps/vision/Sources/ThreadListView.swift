@@ -313,6 +313,13 @@ struct ThreadListView: View {
             }
             .disabled(projects.isEmpty)
 
+            Button {
+                SpeechLabLog.logger.notice("Opening Speech Lab from the task list")
+                openWindow(id: "thread", value: VisionWindowRoute.speechLab)
+            } label: {
+                Label("Speech Lab", systemImage: "waveform.and.mic")
+            }
+
             Menu {
                 Picker("Show", selection: $filter) {
                     ForEach(ThreadFilter.allCases) { filter in
@@ -325,13 +332,6 @@ struct ThreadListView: View {
                     selection = .newProject(UUID())
                 } label: {
                     Label("New Project", systemImage: "folder.badge.plus")
-                }
-                Divider()
-                Button {
-                    SpeechLabLog.logger.notice("Opening Speech Lab from the task list")
-                    openWindow(id: "speech-lab", value: "primary")
-                } label: {
-                    Label("Speech Lab", systemImage: "waveform.and.mic")
                 }
                 Divider()
                 Button("Disconnect") { Task { await model.signOut() } }

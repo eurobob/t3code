@@ -617,6 +617,14 @@ struct SpeechComparisonLabView: View {
         }
         .padding(24)
         .navigationTitle("Speech Lab")
+        .background {
+            VisionWindowWidthController(
+                isExpanded: true,
+                expandedWidth: 1_100,
+                collapsedWidth: 820
+            )
+            .frame(width: 0, height: 0)
+        }
         .onAppear {
             SpeechLabLog.logger.notice("Speech Lab window appeared")
         }

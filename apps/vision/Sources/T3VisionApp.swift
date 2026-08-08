@@ -1,5 +1,9 @@
 import SwiftUI
 
+enum VisionWindowRoute {
+    static let speechLab = "__t3_speech_lab__"
+}
+
 @main
 struct T3VisionApp: App {
     @State private var model = AppModel()
@@ -14,7 +18,9 @@ struct T3VisionApp: App {
 
         WindowGroup(id: "thread", for: String.self) { threadID in
             Group {
-                if case .connected = model.phase, let threadID = threadID.wrappedValue {
+                if threadID.wrappedValue == VisionWindowRoute.speechLab {
+                    SpeechComparisonLabView()
+                } else if case .connected = model.phase, let threadID = threadID.wrappedValue {
                     NavigationStack {
                         ThreadDetailView(threadID: threadID)
                     }
@@ -29,12 +35,6 @@ struct T3VisionApp: App {
             .environment(model)
         }
         .defaultSize(width: 820, height: 780)
-
-        WindowGroup(id: "speech-lab", for: String.self) { _ in
-            SpeechComparisonLabView()
-                .environment(model)
-        }
-        .defaultSize(width: 1_100, height: 760)
     }
 }
 
