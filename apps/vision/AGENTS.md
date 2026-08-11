@@ -106,6 +106,10 @@ project names subordinate as row pretitles or inert section headers. Completed
 tasks always move into a dedicated section at the bottom, including when the
 remaining tasks are grouped by project. New-task creation stays in the detail
 pane and carries an exact project preselection.
+Unfinished tasks are ordered by meaningful engagement state: requests that need
+the user, current work, unread/error results, then ready backlog. Agent event
+timestamps do not reorder working tasks; manual positions and stable user-turn
+recency determine order within each state.
 Provider-advertised model options such as reasoning effort are sent through the
 real `ModelSelection` option surface. The task composer is a layout-reserved
 system-material voice dock: dictation is primary, manual text is opt-in, and it

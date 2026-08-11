@@ -5,6 +5,12 @@ works. T3 Vision keeps recently viewed conversations in memory for the current
 environment, so switching back to a task restores its transcript immediately
 instead of showing another loading screen.
 
+The active task sidebar keeps requests that **Need You** at the top, followed by
+tasks that are working, tasks with unread updates or errors, and then the ready
+backlog. Completed tasks remain in their own section at the bottom. Within each
+state, a manually arranged position wins; otherwise T3 Vision uses stable
+user-turn recency so live agent events do not continually reshuffle tap targets.
+
 The app resumes live updates from the cached conversation's last known position.
 If the server can no longer replay from that position, it replaces the cache with
 a fresh conversation automatically. First visits and conversations outside the

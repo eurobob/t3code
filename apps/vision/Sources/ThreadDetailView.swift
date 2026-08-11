@@ -174,6 +174,8 @@ final class ThreadDetailModel {
     private(set) var submissionRevision = 0
     private(set) var draftRestorationRevision = 0
     private(set) var awaitingAgentStart = false
+    private(set) var optimisticMessageText: String?
+    private(set) var isFinalizingDictationSubmission = false
     private(set) var generatedSummary: VisionTaskBrief?
     private(set) var generatedSummaryRevision: String?
     private(set) var summaryIsLoading = false
@@ -195,6 +197,8 @@ final class ThreadDetailModel {
     private var refreshGeneration = 0
     @ObservationIgnored
     private var turnBeforeSubmissionID: String?
+    @ObservationIgnored
+    private var messageIDsBeforeSubmission: Set<String> = []
 
     init(threadID: String) {
         self.threadID = threadID
@@ -202,7 +206,7 @@ final class ThreadDetailModel {
 
     var thread: OrchestrationThread? { detail?.thread }
 
-    var isBusy: Bool { actionState != .idle }
+    var isBusy: Bool { actionState != .idle || isFinalizingDictationSubmission }
 
     var draft: String {
         get { dictation.text }
@@ -243,6 +247,13 @@ final class ThreadDetailModel {
 
     var workingLabel: String {
         actionState.label ?? "Agent is working"
+    }
+
+    var submissionStatusLabel: String? {
+        if isFinalizingDictationSubmission {
+            return dictationPhase.label ?? "Transcribing on device…"
+        }
+        return actionState.label
     }
 
     var sessionStatus: String { thread?.session?.status ?? "not bound" }
@@ -670,12 +681,21 @@ final class ThreadDetailModel {
         }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else {
+            discardOptimisticSubmission()
             actionError = "Type a message or add an image before sending."
             return
         }
 
         let optimisticDraft = draft
         let optimisticAttachments = attachments
+        if isFinalizingDictationSubmission {
+            isFinalizingDictationSubmission = false
+        }
+        if text.isEmpty {
+            clearOptimisticMessage()
+        } else {
+            stageOptimisticSubmission(text: text)
+        }
         draft = ""
         attachments = []
         submissionRevision &+= 1
@@ -758,8 +778,24 @@ final class ThreadDetailModel {
     }
 
     func finishDictationAndSubmit(using appModel: AppModel) {
+        guard !isBusy else {
+            dictation.presentError("Wait for the current thread action to finish.")
+            return
+        }
+
+        actionError = nil
+        actionNotice = nil
+        isFinalizingDictationSubmission = true
+        stageOptimisticSubmission(
+            text: dictation.previewText.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        submissionRevision &+= 1
         dictation.finish { [weak self, weak appModel] finished in
-            guard finished, let self, let appModel else { return }
+            guard let self else { return }
+            guard finished, let appModel else {
+                self.discardOptimisticSubmission()
+                return
+            }
             submit(using: appModel)
         }
     }
@@ -978,6 +1014,16 @@ final class ThreadDetailModel {
     private func apply(_ snapshot: OrchestrationThreadDetailSnapshot) {
         guard snapshot.snapshotSequence >= (detail?.snapshotSequence ?? 0) else { return }
         detail = snapshot
+        if !isFinalizingDictationSubmission,
+           let optimisticMessageText,
+           snapshot.thread.messages.contains(where: {
+               $0.role == "user"
+                   && !messageIDsBeforeSubmission.contains($0.id)
+                   && $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                       == optimisticMessageText
+           }) {
+            clearOptimisticMessage()
+        }
         if awaitingAgentStart,
            snapshot.thread.latestTurn?.turnId != turnBeforeSubmissionID {
             awaitingAgentStart = false
@@ -1039,6 +1085,7 @@ final class ThreadDetailModel {
         } catch {
             awaitingAgentStart = false
             turnBeforeSubmissionID = nil
+            clearOptimisticMessage()
             if draft.isEmpty {
                 draft = optimisticDraft
                 draftRestorationRevision &+= 1
@@ -1050,6 +1097,21 @@ final class ThreadDetailModel {
             )
             actionError = error.localizedDescription
         }
+    }
+
+    private func stageOptimisticSubmission(text: String) {
+        optimisticMessageText = text
+        messageIDsBeforeSubmission = Set(thread?.messages.map(\.id) ?? [])
+    }
+
+    private func discardOptimisticSubmission() {
+        isFinalizingDictationSubmission = false
+        clearOptimisticMessage()
+    }
+
+    private func clearOptimisticMessage() {
+        optimisticMessageText = nil
+        messageIDsBeforeSubmission.removeAll(keepingCapacity: true)
     }
 
     private func performInterrupt(using appModel: AppModel) async {
@@ -1391,6 +1453,11 @@ struct ThreadDetailView: View {
                         }
                     }
 
+                    if let optimisticMessageText = model.optimisticMessageText {
+                        OptimisticMessageBubble(text: optimisticMessageText)
+                            .id("\(model.threadID)-optimistic-message")
+                    }
+
                     if model.isAgentWorking {
                         AgentWorkingRow(label: model.workingLabel)
                             .id("\(model.threadID)-working")
@@ -1590,7 +1657,7 @@ struct ThreadDetailView: View {
                 Text(model.thread?.title ?? "Task")
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
-                if let label = model.actionState.label {
+                if let label = model.submissionStatusLabel {
                     HStack(spacing: 7) {
                         Image(systemName: "ellipsis")
                             .fontWeight(.semibold)
@@ -1691,7 +1758,8 @@ struct ThreadDetailView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(label)
                             .font(.caption.weight(.semibold))
-                        if !model.volatileDictation.isEmpty {
+                        if model.optimisticMessageText == nil,
+                           !model.volatileDictation.isEmpty {
                             Text(model.volatileDictation)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1714,7 +1782,9 @@ struct ThreadDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if model.isDictating, !voicePreview.isEmpty {
+            if model.isDictating,
+               model.optimisticMessageText == nil,
+               !voicePreview.isEmpty {
                 Text(voicePreview)
                     .font(.body)
                     .foregroundStyle(.primary)
@@ -2610,5 +2680,37 @@ private struct MessageBubble: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .frame(maxWidth: 620, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+    }
+}
+
+private struct OptimisticMessageBubble: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                Text("User")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityLabel("Preparing message")
+            }
+
+            if text.isEmpty {
+                Text("Transcribing…")
+                    .foregroundStyle(.secondary)
+                    .italic()
+            } else {
+                MarkdownMessageView(text, isStreaming: false)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color.accentColor.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .frame(maxWidth: 620, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
