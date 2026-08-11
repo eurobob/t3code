@@ -751,7 +751,7 @@ final class ThreadDetailModel {
     }
 
     func finishDictationAndSubmit(using appModel: AppModel) {
-        dictation.finish(forSending: true) { [weak self, weak appModel] finished in
+        dictation.finish { [weak self, weak appModel] finished in
             guard finished, let self, let appModel else { return }
             submit(using: appModel)
         }
