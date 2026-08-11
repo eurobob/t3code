@@ -1,4 +1,5 @@
 import AudioToolbox
+import AVFoundation
 import CoreImage
 import CoreMedia
 import Foundation
@@ -11,6 +12,7 @@ enum VisionScreenCaptureError: LocalizedError {
     case cancelled
     case noFrame
     case encodingFailed
+    case recordingFailed
 
     var errorDescription: String? {
         switch self {
@@ -18,6 +20,7 @@ enum VisionScreenCaptureError: LocalizedError {
         case .cancelled: "Screen capture was cancelled."
         case .noFrame: "The selected content did not produce an image."
         case .encodingFailed: "The captured frame could not be encoded."
+        case .recordingFailed: "The screen clip could not be recorded."
         }
     }
 }
@@ -28,14 +31,18 @@ final class VisionScreenCaptureController {
     static let utilityWindowID = "screenshot-utility"
 
     enum Mode: Equatable {
-        case view
+        case screenshot
+        case frames
 
         var selectionStyle: SCShareableContentStyle {
             .display
         }
 
         var readyLabel: String {
-            "Ready to capture"
+            switch self {
+            case .screenshot: "Ready to capture"
+            case .frames: "Ready to record"
+            }
         }
     }
 
@@ -45,6 +52,7 @@ final class VisionScreenCaptureController {
         case preparing(Mode)
         case ready(Mode)
         case counting(Mode, Int)
+        case recording(Mode, Int)
         case capturing(Mode)
     }
 
@@ -57,6 +65,8 @@ final class VisionScreenCaptureController {
     private var countdownTask: Task<Void, Never>?
     @ObservationIgnored
     private var onCaptured: ((Data) -> Void)?
+    @ObservationIgnored
+    private var onClipCaptured: ((URL) -> Void)?
     @ObservationIgnored
     private var onFailure: ((Error) -> Void)?
 
@@ -72,6 +82,7 @@ final class VisionScreenCaptureController {
         case .preparing: "Starting capture…"
         case let .ready(mode): mode.readyLabel
         case let .counting(_, seconds): "Capturing in \(seconds)…"
+        case let .recording(_, seconds): "Recording… \(seconds)s"
         case .capturing: "Capturing…"
         }
     }
@@ -79,6 +90,7 @@ final class VisionScreenCaptureController {
     func begin(
         mode: Mode,
         onCaptured: @escaping (Data) -> Void,
+        onClipCaptured: @escaping (URL) -> Void = { _ in },
         onReady: @escaping () -> Void,
         onFailure: @escaping (Error) -> Void
     ) {
@@ -89,6 +101,7 @@ final class VisionScreenCaptureController {
         }
 
         self.onCaptured = onCaptured
+        self.onClipCaptured = onClipCaptured
         self.onFailure = onFailure
         phase = .choosing(mode)
 
@@ -154,6 +167,43 @@ final class VisionScreenCaptureController {
         }
     }
 
+    func recordClip(duration: Int = 5, delay: Int = 0) {
+        guard activeMode == .frames, let session else { return }
+        countdownTask?.cancel()
+        countdownTask = Task {
+            for remaining in stride(from: max(0, delay), through: 1, by: -1) {
+                guard !Task.isCancelled else { return }
+                phase = .counting(.frames, remaining)
+                AudioServicesPlaySystemSound(1104)
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard !Task.isCancelled else { return }
+
+            do {
+                AudioServicesPlaySystemSound(1117)
+                try session.startClipRecording()
+                for remaining in stride(from: max(1, duration), through: 1, by: -1) {
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    phase = .recording(.frames, remaining)
+                    try await Task.sleep(for: .seconds(1))
+                }
+                let url = try await session.finishClipRecording()
+                AudioServicesPlaySystemSound(1118)
+                let callback = onClipCaptured
+                reset()
+                callback?(url)
+            } catch is CancellationError {
+                await session.cancel()
+                reset()
+            } catch {
+                let callback = onFailure
+                await session.cancel()
+                reset()
+                callback?(error)
+            }
+        }
+    }
+
     func cancel() {
         let session = session
         reset()
@@ -163,7 +213,7 @@ final class VisionScreenCaptureController {
     private var activeMode: Mode? {
         switch phase {
         case let .choosing(mode), let .preparing(mode), let .ready(mode),
-             let .counting(mode, _), let .capturing(mode): mode
+             let .counting(mode, _), let .recording(mode, _), let .capturing(mode): mode
         case .idle: nil
         }
     }
@@ -173,8 +223,104 @@ final class VisionScreenCaptureController {
         countdownTask = nil
         session = nil
         onCaptured = nil
+        onClipCaptured = nil
         onFailure = nil
         phase = .idle
+    }
+}
+
+private final class VisionClipRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    private var outputURL: URL?
+    private var isRecording = false
+    private var failure: Error?
+
+    func start() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isRecording else { return }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("T3 Capture \(UUID().uuidString).mov")
+        writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        outputURL = url
+        input = nil
+        failure = nil
+        isRecording = true
+    }
+
+    func append(_ sampleBuffer: CMSampleBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isRecording, failure == nil, let writer else { return }
+
+        if input == nil {
+            guard let imageBuffer = sampleBuffer.imageBuffer else { return }
+            let input = AVAssetWriterInput(
+                mediaType: .video,
+                outputSettings: [
+                    AVVideoCodecKey: AVVideoCodecType.h264,
+                    AVVideoWidthKey: CVPixelBufferGetWidth(imageBuffer),
+                    AVVideoHeightKey: CVPixelBufferGetHeight(imageBuffer),
+                ]
+            )
+            input.expectsMediaDataInRealTime = true
+            guard writer.canAdd(input) else {
+                failure = VisionScreenCaptureError.recordingFailed
+                return
+            }
+            writer.add(input)
+            guard writer.startWriting() else {
+                failure = writer.error ?? VisionScreenCaptureError.recordingFailed
+                return
+            }
+            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+            self.input = input
+        }
+
+        guard let input, input.isReadyForMoreMediaData else { return }
+        if !input.append(sampleBuffer) {
+            failure = writer.error ?? VisionScreenCaptureError.recordingFailed
+        }
+    }
+
+    func finish() async throws -> URL {
+        let writer: AVAssetWriter
+        let url: URL
+        lock.lock()
+        isRecording = false
+        guard failure == nil,
+              let activeWriter = self.writer,
+              let activeInput = input,
+              let activeURL = outputURL else {
+            let error = failure ?? VisionScreenCaptureError.recordingFailed
+            lock.unlock()
+            throw error
+        }
+        activeInput.markAsFinished()
+        writer = activeWriter
+        url = activeURL
+        lock.unlock()
+
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw writer.error ?? VisionScreenCaptureError.recordingFailed
+        }
+        return url
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        isRecording = false
+        writer?.cancelWriting()
+        if let outputURL {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        writer = nil
+        input = nil
+        outputURL = nil
     }
 }
 
@@ -214,6 +360,7 @@ private final class VisionScreenCaptureSession: NSObject,
     private let onFailure: (Error) -> Void
     private let sampleQueue = DispatchQueue(label: "codes.t3.vision.screen-capture")
     private let frames = VisionLatestFrameStore()
+    private let clipRecorder = VisionClipRecorder()
     private var stream: SCStream?
     private var isStopping = false
 
@@ -273,6 +420,8 @@ private final class VisionScreenCaptureSession: NSObject,
             onPreparing()
             let configuration = SCStreamConfiguration()
             configuration.capturesAudio = false
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+            configuration.queueDepth = 6
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
             self.stream = stream
@@ -294,6 +443,7 @@ private final class VisionScreenCaptureSession: NSObject,
         if frames.store(pixelBuffer) {
             Task { @MainActor in onReady() }
         }
+        clipRecorder.append(sampleBuffer)
     }
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -321,7 +471,18 @@ private final class VisionScreenCaptureSession: NSObject,
     }
 
     func cancel() async {
+        clipRecorder.cancel()
         await stopStream()
+    }
+
+    func startClipRecording() throws {
+        try clipRecorder.start()
+    }
+
+    func finishClipRecording() async throws -> URL {
+        let url = try await clipRecorder.finish()
+        await stopStream()
+        return url
     }
 
     private func stopStream() async {

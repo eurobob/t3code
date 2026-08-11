@@ -33,6 +33,7 @@ struct VisionDraftAttachment: Identifiable, Sendable, Equatable {
 struct VisionImageAttachmentPicker: View {
     @SwiftUI.Environment(VisionScreenCaptureController.self) private var screenCapture
     @SwiftUI.Environment(VisionImageAnnotationController.self) private var imageAnnotation
+    @SwiftUI.Environment(VisionFrameReviewController.self) private var frameReview
     @SwiftUI.Environment(\.openWindow) private var openWindow
 
     @Binding var attachments: [VisionDraftAttachment]
@@ -86,14 +87,21 @@ struct VisionImageAttachmentPicker: View {
             Button("Screenshot View") {
                 Task {
                     try? await Task.sleep(for: .milliseconds(300))
-                    beginCapture(.view)
+                    beginCapture(.screenshot)
+                }
+            }
+            .disabled(!VisionScreenCaptureController.isSupported)
+            Button("Capture Frames") {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    beginCapture(.frames)
                 }
             }
             .disabled(!VisionScreenCaptureController.isSupported)
             Button("Cancel", role: .cancel) {}
         } message: {
             if VisionScreenCaptureController.isSupported {
-                Text("Start sharing the display, position the movable shutter, then capture with an audible countdown.")
+                Text("Capture one screenshot, or record a short clip and choose individual frames.")
             } else {
                 Text("Screen recording is unavailable or not allowed on this device.")
             }
@@ -195,6 +203,12 @@ struct VisionImageAttachmentPicker: View {
                     }
                 }
             },
+            onClipCaptured: { url in
+                frameReview.begin(url: url, maximumSelectionCount: remainingCount) { selected in
+                    attachments.append(contentsOf: selected.prefix(remainingCount))
+                }
+                openWindow(id: VisionFrameReviewController.windowID)
+            },
             onReady: {
                 openWindow(id: VisionScreenCaptureController.utilityWindowID)
             },
@@ -231,21 +245,30 @@ struct VisionScreenCaptureUtilityView: View {
     var body: some View {
         @Bindable var controller = controller
         VStack(alignment: .leading, spacing: 16) {
-            Label("Screenshot ready", systemImage: "camera.viewfinder")
+            Label(title, systemImage: mode == .frames ? "video" : "camera.viewfinder")
                 .font(.headline)
 
-            Text("Move this control out of the way, then choose a countdown. It closes before T3 captures what you are viewing.")
+            Text(instructions)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
-                Button("Take Screenshot") { takeScreenshot() }
-                    .buttonStyle(.borderedProminent)
-                Button("5 Seconds") { startCountdown(seconds: 5) }
-                    .buttonStyle(.bordered)
+                if mode == .frames {
+                    Button("Record 5-Second Clip") { recordClip(delay: 0) }
+                        .buttonStyle(.borderedProminent)
+                    Button("Start in 5 Seconds") { recordClip(delay: 5) }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Take Screenshot") { takeScreenshot() }
+                        .buttonStyle(.borderedProminent)
+                    Button("5 Seconds") { startCountdown(seconds: 5) }
+                        .buttonStyle(.bordered)
+                }
             }
 
-            Toggle("Annotate after capture", isOn: $controller.annotateAfterCapture)
+            if mode == .screenshot {
+                Toggle("Annotate after capture", isOn: $controller.annotateAfterCapture)
+            }
 
             Button("Cancel", role: .cancel) {
                 controller.cancel()
@@ -266,6 +289,26 @@ struct VisionScreenCaptureUtilityView: View {
         }
     }
 
+    private var mode: VisionScreenCaptureController.Mode? {
+        switch controller.phase {
+        case let .choosing(mode), let .preparing(mode), let .ready(mode),
+             let .counting(mode, _), let .recording(mode, _), let .capturing(mode): mode
+        case .idle: nil
+        }
+    }
+
+    private var title: String {
+        mode == .frames ? "Frame capture ready" : "Screenshot ready"
+    }
+
+    private var instructions: String {
+        if mode == .frames {
+            "Move this control aside, then record. After five seconds, choose and annotate individual frames from the clip."
+        } else {
+            "Move this control out of the way, then choose a countdown. It closes before T3 captures what you are viewing."
+        }
+    }
+
     private func startCountdown(seconds: Int) {
         let controller = controller
         dismiss()
@@ -283,6 +326,16 @@ struct VisionScreenCaptureUtilityView: View {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             controller.captureNow()
+        }
+    }
+
+    private func recordClip(delay: Int) {
+        let controller = controller
+        dismiss()
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            controller.recordClip(duration: 5, delay: delay)
         }
     }
 }

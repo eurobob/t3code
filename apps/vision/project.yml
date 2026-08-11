@@ -79,7 +79,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: T3 Vision connects to T3 Code servers on your local network.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: T3 Vision uses the microphone to dictate task descriptions and instructions.
-        INFOPLIST_KEY_NSScreenCaptureUsageDescription: T3 Vision captures user-selected shared content as an image attachment.
+        INFOPLIST_KEY_NSScreenCaptureUsageDescription: T3 Vision captures user-selected shared content as screenshots or short clips for extracting image attachments.
     info:
       path: Info.plist
       properties:

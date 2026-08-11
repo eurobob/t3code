@@ -121,6 +121,11 @@ The microphone is an unlabeled circular target with neutral, hover, and recordin
 colors. Selecting another task assigns the detail view that thread's identity so
 SwiftUI cannot retain the previous thread model. Auto-scroll targets a spacer
 after the final message to preserve breathing room above the voice dock.
+Image capture can also record a five-second temporary ScreenCaptureKit clip.
+The frame-review window uses a velocity-sensitive timeline for coarse-to-fine
+scrubbing, extracts only user-selected frames as image attachments, and routes
+those frames through the same PaperKit annotation window before or after
+selection. The source movie is discarded when review finishes or is cancelled.
 An active dictation session continues when visionOS hides T3 Vision for another
 app's immersive space, and its mixable audio session leaves that app's audio
 audible while feedback is recorded.
@@ -211,8 +216,11 @@ action dismisses the shutter and captures immediately; the five-second action
 leaves time to enter an immersive app. Capture stops sharing and returns the image
 to the originating composer. Draft thumbnails can open a separate visionOS 27
 PaperKit annotation window, and the shutter can opt into opening that editor after
-every capture. Saving flattens the system drawing tools into a replacement image
-with the same draft attachment identity. The
+every capture. The editor fits the complete image on open and exposes persistent
+pen, marker, eraser, color, width, undo, and redo controls instead of depending on
+PaperKit's floating palette. Direct and indirect pointer input are both forced into
+drawing mode while the canvas is active. Saving flattens the markup into a
+replacement image with the same draft attachment identity. The
 window-specific ScreenCaptureKit picker must not be offered because visionOS 27
 reports that selection style as unsupported at runtime.
 The earlier visionOS 26 implementation passed a device build and was installed and

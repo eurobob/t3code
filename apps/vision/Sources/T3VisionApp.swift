@@ -5,6 +5,7 @@ struct T3VisionApp: App {
     @State private var model = AppModel()
     @State private var screenCapture = VisionScreenCaptureController()
     @State private var imageAnnotation = VisionImageAnnotationController()
+    @State private var frameReview = VisionFrameReviewController()
 
     var body: some Scene {
         WindowGroup {
@@ -12,6 +13,7 @@ struct T3VisionApp: App {
                 .environment(model)
                 .environment(screenCapture)
                 .environment(imageAnnotation)
+                .environment(frameReview)
                 .task { await model.restore() }
                 .task { await VisionWhisperKitService.shared.prepareIfNeeded() }
         }
@@ -34,6 +36,7 @@ struct T3VisionApp: App {
             .environment(model)
             .environment(screenCapture)
             .environment(imageAnnotation)
+            .environment(frameReview)
         }
         .defaultSize(width: 820, height: 780)
 
@@ -49,6 +52,13 @@ struct T3VisionApp: App {
                 .environment(imageAnnotation)
         }
         .defaultSize(width: 1_100, height: 760)
+
+        Window("Capture Frames", id: VisionFrameReviewController.windowID) {
+            VisionFrameReviewView()
+                .environment(frameReview)
+                .environment(imageAnnotation)
+        }
+        .defaultSize(width: 1_100, height: 900)
     }
 }
 
