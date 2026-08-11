@@ -31,6 +31,9 @@ struct VisionDraftAttachment: Identifiable, Sendable, Equatable {
 }
 
 struct VisionImageAttachmentPicker: View {
+    @SwiftUI.Environment(VisionScreenCaptureController.self) private var screenCapture
+    @SwiftUI.Environment(\.openWindow) private var openWindow
+
     @Binding var attachments: [VisionDraftAttachment]
     let isEnabled: Bool
 
@@ -39,7 +42,6 @@ struct VisionImageAttachmentPicker: View {
     @State private var showsFiles = false
     @State private var isPreparing = false
     @State private var errorMessage: String?
-    @State private var screenCapture = VisionScreenCaptureController()
 
     init(
         attachments: Binding<[VisionDraftAttachment]>,
@@ -80,36 +82,20 @@ struct VisionImageAttachmentPicker: View {
                     showsFiles = true
                 }
             }
-            Button("Screenshot Window") {
+            Button("Screenshot View") {
                 Task {
                     try? await Task.sleep(for: .milliseconds(300))
-                    beginCapture(.window)
-                }
-            }
-            .disabled(!VisionScreenCaptureController.isSupported)
-            Button("Screenshot Immersive View (5 Seconds)") {
-                Task {
-                    try? await Task.sleep(for: .milliseconds(300))
-                    beginCapture(.immersive)
+                    beginCapture(.view)
                 }
             }
             .disabled(!VisionScreenCaptureController.isSupported)
             Button("Cancel", role: .cancel) {}
         } message: {
             if VisionScreenCaptureController.isSupported {
-                Text("Window capture waits for your shutter. Immersive capture uses an audible five-second countdown after you select the full display.")
+                Text("Start sharing the display, position the movable shutter, then capture with an audible countdown.")
             } else {
                 Text("Screen recording is unavailable or not allowed on this device.")
             }
-        }
-        .popover(
-            isPresented: Binding(
-                get: { screenCapture.showsControls },
-                set: { if !$0 { screenCapture.cancel() } }
-            ),
-            arrowEdge: .bottom
-        ) {
-            VisionScreenCaptureControls(controller: screenCapture)
         }
         .sheet(isPresented: $showsPhotos) {
             VisionPhotoLibraryPicker(
@@ -139,7 +125,6 @@ struct VisionImageAttachmentPicker: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .onDisappear { screenCapture.cancel() }
     }
 
     private var remainingCount: Int { max(0, 8 - attachments.count) }
@@ -204,6 +189,9 @@ struct VisionImageAttachmentPicker: View {
                     }
                 }
             },
+            onReady: {
+                openWindow(id: VisionScreenCaptureController.utilityWindowID)
+            },
             onFailure: { error in
                 errorMessage = error.localizedDescription
             }
@@ -219,52 +207,52 @@ struct VisionImageAttachmentPicker: View {
     }
 }
 
-private struct VisionScreenCaptureControls: View {
-    let controller: VisionScreenCaptureController
+struct VisionScreenCaptureUtilityView: View {
+    @SwiftUI.Environment(VisionScreenCaptureController.self) private var controller
+    @SwiftUI.Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label(controller.statusLabel, systemImage: statusIcon)
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Screenshot ready", systemImage: "camera.viewfinder")
                 .font(.headline)
 
-            switch controller.phase {
-            case .ready(.window):
-                Text("Arrange or interact with the selected window, then take the frame you want.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Capture Now") { controller.captureNow() }
-                        .buttonStyle(.borderedProminent)
-                    Button("3 Seconds") { controller.captureAfter(seconds: 3) }
-                        .buttonStyle(.bordered)
-                }
-            case let .counting(mode, _):
-                Text(
-                    mode == .immersive
-                        ? "Return to the immersive app. T3 will stop sharing automatically."
-                        : "Keep the selected window in the state you want."
-                )
+            Text("Move this control out of the way, then choose a countdown. It closes before T3 captures what you are viewing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            case .capturing:
-                ProgressView()
-                    .controlSize(.small)
-            case .idle, .choosing, .preparing, .ready(.immersive):
-                EmptyView()
+
+            HStack(spacing: 12) {
+                Button("Take Screenshot") { startCountdown(seconds: 3) }
+                    .buttonStyle(.borderedProminent)
+                Button("5 Seconds") { startCountdown(seconds: 5) }
+                    .buttonStyle(.bordered)
             }
 
-            Button("Cancel", role: .destructive) { controller.cancel() }
-                .buttonStyle(.bordered)
+            Button("Cancel", role: .cancel) {
+                controller.cancel()
+                dismiss()
+            }
         }
         .padding(20)
         .frame(width: 360)
+        .onChange(of: controller.phase) {
+            if controller.phase == .idle {
+                dismiss()
+            }
+        }
+        .onAppear {
+            if controller.phase == .idle {
+                dismiss()
+            }
+        }
     }
 
-    private var statusIcon: String {
-        switch controller.phase {
-        case .counting: "timer"
-        case .capturing: "camera.fill"
-        default: "rectangle.dashed"
+    private func startCountdown(seconds: Int) {
+        let controller = controller
+        dismiss()
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            controller.captureAfter(seconds: seconds)
         }
     }
 }

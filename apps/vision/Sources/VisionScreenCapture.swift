@@ -25,22 +25,17 @@ enum VisionScreenCaptureError: LocalizedError {
 @MainActor
 @Observable
 final class VisionScreenCaptureController {
+    static let utilityWindowID = "screenshot-utility"
+
     enum Mode: Equatable {
-        case window
-        case immersive
+        case view
 
         var selectionStyle: SCShareableContentStyle {
-            switch self {
-            case .window: .window
-            case .immersive: .display
-            }
+            .display
         }
 
         var readyLabel: String {
-            switch self {
-            case .window: "Window ready"
-            case .immersive: "Immersive view ready"
-            }
+            "Ready to capture"
         }
     }
 
@@ -68,18 +63,11 @@ final class VisionScreenCaptureController {
 
     var isActive: Bool { phase != .idle }
 
-    var showsControls: Bool {
-        switch phase {
-        case .ready, .counting, .capturing: true
-        case .idle, .choosing, .preparing: false
-        }
-    }
-
     var statusLabel: String {
         switch phase {
         case .idle: "Screen capture"
-        case let .choosing(mode):
-            mode == .window ? "Choose a window" : "Choose the full display"
+        case .choosing:
+            "Choose the full display"
         case .preparing: "Starting capture…"
         case let .ready(mode): mode.readyLabel
         case let .counting(_, seconds): "Capturing in \(seconds)…"
@@ -90,6 +78,7 @@ final class VisionScreenCaptureController {
     func begin(
         mode: Mode,
         onCaptured: @escaping (Data) -> Void,
+        onReady: @escaping () -> Void,
         onFailure: @escaping (Error) -> Void
     ) {
         guard phase == .idle else { return }
@@ -110,9 +99,7 @@ final class VisionScreenCaptureController {
             onReady: { [weak self] in
                 guard let self else { return }
                 phase = .ready(mode)
-                if mode == .immersive {
-                    captureAfter(seconds: 5)
-                }
+                onReady()
             },
             onCancelled: { [weak self] in
                 self?.reset()

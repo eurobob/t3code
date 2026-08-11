@@ -205,10 +205,13 @@ client because the server has no thread-order command.
 
 The client now targets visionOS 27 and requires Xcode 27 so its ScreenCaptureKit
 shared-content picker compiles directly, without a visionOS 26 fallback. Image
-attachments support Photos, Files, explicit window capture, and an audible
-five-second full-display capture that continues while an immersive app hides T3
-Vision. Window capture stays armed until the user chooses Capture Now or a
-three-second countdown; stopping sharing cancels instead of attaching a frame.
+attachments support Photos, Files, and full-display screenshots. The screenshot
+flow opens a separate movable shutter window after sharing begins; choosing its
+three- or five-second action dismisses that window before an audible countdown,
+captures the latest frame, stops sharing, and returns the image to the originating
+composer. The five-second path leaves time to enter an immersive app. The
+window-specific ScreenCaptureKit picker must not be offered because visionOS 27
+reports that selection style as unsupported at runtime.
 The earlier visionOS 26 implementation passed a device build and was installed and
 launched on a paired Apple Vision Pro through the deploy bridge on 2026-08-07,
 most recently at product commit `ab7f87a7`.

@@ -3,11 +3,13 @@ import SwiftUI
 @main
 struct T3VisionApp: App {
     @State private var model = AppModel()
+    @State private var screenCapture = VisionScreenCaptureController()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
+                .environment(screenCapture)
                 .task { await model.restore() }
                 .task { await VisionWhisperKitService.shared.prepareIfNeeded() }
         }
@@ -28,8 +30,16 @@ struct T3VisionApp: App {
                 }
             }
             .environment(model)
+            .environment(screenCapture)
         }
         .defaultSize(width: 820, height: 780)
+
+        Window("Screenshot", id: VisionScreenCaptureController.utilityWindowID) {
+            VisionScreenCaptureUtilityView()
+                .environment(screenCapture)
+        }
+        .defaultSize(width: 360, height: 220)
+        .windowResizability(.contentSize)
     }
 }
 
