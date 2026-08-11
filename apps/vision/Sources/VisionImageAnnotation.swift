@@ -16,6 +16,72 @@ enum VisionImageAnnotationError: LocalizedError {
     }
 }
 
+private enum VisionAnnotationTool: String, CaseIterable {
+    case pen
+    case marker
+    case eraser
+
+    var title: String {
+        switch self {
+        case .pen: "Pen"
+        case .marker: "Marker"
+        case .eraser: "Eraser"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .pen: "pencil.tip"
+        case .marker: "highlighter"
+        case .eraser: "eraser.fill"
+        }
+    }
+}
+
+private enum VisionAnnotationColor: String, CaseIterable {
+    case red
+    case yellow
+    case green
+    case blue
+    case white
+
+    var swiftUIColor: Color {
+        switch self {
+        case .red: .red
+        case .yellow: .yellow
+        case .green: .green
+        case .blue: .blue
+        case .white: .white
+        }
+    }
+
+    var uiColor: UIColor {
+        switch self {
+        case .red: .systemRed
+        case .yellow: .systemYellow
+        case .green: .systemGreen
+        case .blue: .systemBlue
+        case .white: .white
+        }
+    }
+}
+
+private enum VisionAnnotationWidth: String, CaseIterable {
+    case thin
+    case medium
+    case thick
+
+    var title: String { rawValue.capitalized }
+
+    var points: CGFloat {
+        switch self {
+        case .thin: 5
+        case .medium: 12
+        case .thick: 24
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class VisionImageAnnotationController {
@@ -83,6 +149,9 @@ private struct VisionPaperAnnotationView: View {
     @State private var editor: VisionPaperAnnotationEditor?
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var selectedTool = VisionAnnotationTool.pen
+    @State private var selectedColor = VisionAnnotationColor.red
+    @State private var selectedWidth = VisionAnnotationWidth.medium
 
     var body: some View {
         VStack(spacing: 0) {
@@ -115,6 +184,10 @@ private struct VisionPaperAnnotationView: View {
             .padding(.vertical, 14)
             .background(.regularMaterial)
 
+            if let editor {
+                annotationToolbar(editor: editor)
+            }
+
             Group {
                 if let editor {
                     VisionPaperMarkupCanvas(editor: editor)
@@ -132,11 +205,76 @@ private struct VisionPaperAnnotationView: View {
         }
         .task(id: session.id) {
             do {
-                editor = try VisionPaperAnnotationEditor(attachment: session.attachment)
+                let prepared = try VisionPaperAnnotationEditor(attachment: session.attachment)
+                editor = prepared
+                applySelectedTool(to: prepared)
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func annotationToolbar(editor: VisionPaperAnnotationEditor) -> some View {
+        HStack(spacing: 16) {
+            Picker("Tool", selection: $selectedTool) {
+                ForEach(VisionAnnotationTool.allCases, id: \.self) { tool in
+                    Label(tool.title, systemImage: tool.systemImage).tag(tool)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 340)
+
+            HStack(spacing: 8) {
+                ForEach(VisionAnnotationColor.allCases, id: \.self) { color in
+                    Button {
+                        selectedColor = color
+                    } label: {
+                        Circle()
+                            .fill(color.swiftUIColor)
+                            .frame(width: 26, height: 26)
+                            .overlay {
+                                Circle().stroke(
+                                    selectedColor == color ? Color.primary : Color.clear,
+                                    lineWidth: 3
+                                )
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(color.rawValue.capitalized) ink")
+                }
+            }
+            .opacity(selectedTool == .eraser ? 0.35 : 1)
+
+            Picker("Width", selection: $selectedWidth) {
+                ForEach(VisionAnnotationWidth.allCases, id: \.self) { width in
+                    Text(width.title).tag(width)
+                }
+            }
+            .frame(width: 150)
+            .disabled(selectedTool == .eraser)
+
+            Spacer()
+
+            Button {
+                editor.showSystemTools()
+            } label: {
+                Label("More Tools", systemImage: "paintpalette")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(.thinMaterial)
+        .onChange(of: selectedTool) { applySelectedTool(to: editor) }
+        .onChange(of: selectedColor) { applySelectedTool(to: editor) }
+        .onChange(of: selectedWidth) { applySelectedTool(to: editor) }
+    }
+
+    private func applySelectedTool(to editor: VisionPaperAnnotationEditor) {
+        editor.select(
+            selectedTool,
+            color: selectedColor.uiColor,
+            width: selectedWidth.points
+        )
     }
 
     private func save() {
@@ -190,12 +328,45 @@ private final class VisionPaperAnnotationEditor {
         self.viewController = viewController
 
         viewController.isEditable = true
-        viewController.directTouchMode = .drawing
-        viewController.directTouchAutomaticallyDraws = true
-        viewController.indirectPointerTouchMode = .drawing
         toolPicker.addObserver(viewController)
         viewController.pencilKitResponderState.activeToolPicker = toolPicker
         viewController.pencilKitResponderState.toolPickerVisibility = .visible
+        activateDrawingAndFitImage()
+    }
+
+    func select(_ tool: VisionAnnotationTool, color: UIColor, width: CGFloat) {
+        switch tool {
+        case .pen:
+            viewController.drawingTool = PKInkingTool(.pen, color: color, width: width)
+        case .marker:
+            viewController.drawingTool = PKInkingTool(
+                .marker,
+                color: color,
+                width: max(12, width * 1.8)
+            )
+        case .eraser:
+            viewController.drawingTool = PKEraserTool(.vector)
+        }
+        activateDrawing()
+    }
+
+    func showSystemTools() {
+        activateDrawing()
+        viewController.pencilKitResponderState.toolPickerVisibility = .visible
+    }
+
+    func activateDrawingAndFitImage() {
+        activateDrawing()
+        guard let bounds = viewController.markup?.bounds else { return }
+        viewController.setContentVisibleFrame(bounds, animated: false)
+    }
+
+    private func activateDrawing() {
+        viewController.directTouchMode = .drawing
+        viewController.directTouchAutomaticallyDraws = true
+        viewController.indirectPointerTouchMode = .drawing
+        viewController.pencilKitResponderState.activeToolPicker = toolPicker
+        _ = viewController.becomeFirstResponder()
     }
 
     func undo() {
@@ -239,12 +410,59 @@ private final class VisionPaperAnnotationEditor {
 private struct VisionPaperMarkupCanvas: UIViewControllerRepresentable {
     let editor: VisionPaperAnnotationEditor
 
-    func makeUIViewController(context: Context) -> PaperMarkupViewController {
-        editor.viewController
+    func makeUIViewController(context: Context) -> VisionPaperMarkupHostController {
+        VisionPaperMarkupHostController(editor: editor)
     }
 
     func updateUIViewController(
-        _ viewController: PaperMarkupViewController,
+        _ viewController: VisionPaperMarkupHostController,
         context: Context
     ) {}
+}
+
+@MainActor
+private final class VisionPaperMarkupHostController: UIViewController {
+    private let editor: VisionPaperAnnotationEditor
+    private var fittedSize = CGSize.zero
+
+    init(editor: VisionPaperAnnotationEditor) {
+        self.editor = editor
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        let canvas = editor.viewController
+        addChild(canvas)
+        canvas.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(canvas.view)
+        NSLayoutConstraint.activate([
+            canvas.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            canvas.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            canvas.view.topAnchor.constraint(equalTo: view.topAnchor),
+            canvas.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
+        canvas.didMove(toParent: self)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        editor.activateDrawingAndFitImage()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = view.bounds.size
+        guard size.width > 0, size.height > 0, size != fittedSize else { return }
+        fittedSize = size
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.editor.activateDrawingAndFitImage()
+        }
+    }
 }
