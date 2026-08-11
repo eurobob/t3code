@@ -1,5 +1,17 @@
 import SwiftUI
 
+private enum VisionWorkspaceMode: String, CaseIterable {
+    case currentCheckout
+    case worktree
+
+    var title: String {
+        switch self {
+        case .currentCheckout: "Current checkout"
+        case .worktree: "New worktree"
+        }
+    }
+}
+
 struct NewTaskView: View {
     @SwiftUI.Environment(AppModel.self) private var model
 
@@ -8,15 +20,22 @@ struct NewTaskView: View {
 
     @State private var projectID: String
     @State private var title = ""
-    @State private var prompt = ""
+    @State private var promptDictation = VisionDictationDraft()
     @State private var modelID = ""
     @State private var stringOptions: [String: String] = [:]
     @State private var booleanOptions: [String: Bool] = [:]
     @State private var preservedSelection: ModelSelection?
     @State private var runtimeModeID = RuntimeMode.fullAccess.rawValue
     @State private var interactionModeID = InteractionMode.default.rawValue
+    @State private var workspaceMode = VisionWorkspaceMode.worktree
+    @State private var branches: [VisionWorkspaceBranch] = []
+    @State private var selectedBranchID = ""
+    @State private var startFromOrigin = true
+    @State private var branchesLoading = false
+    @State private var branchLoadError: String?
     @State private var isCreating = false
     @State private var errorMessage: String?
+    @State private var microphoneHovered = false
 
     init(
         projectID: String?,
@@ -71,6 +90,10 @@ struct NewTaskView: View {
         )
     }
 
+    private var selectedBranch: VisionWorkspaceBranch? {
+        branches.first { $0.id == selectedBranchID }
+    }
+
     var body: some View {
         Form {
             if let errorMessage {
@@ -87,8 +110,53 @@ struct NewTaskView: View {
                     }
                 }
                 TextField("Name (optional)", text: $title)
-                TextField("What should the agent do?", text: $prompt, axis: .vertical)
-                    .lineLimit(4...12)
+                taskDescriptionEditor
+            }
+
+            Section("Workspace") {
+                Picker("Checkout", selection: $workspaceMode) {
+                    ForEach(VisionWorkspaceMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+
+                if branchesLoading, branches.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading branches…")
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let branchLoadError {
+                    Label(branchLoadError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Retry") {
+                        Task { await loadBranches(refresh: true) }
+                    }
+                } else if workspaceMode == .worktree {
+                    if branches.isEmpty {
+                        Text("No Git branches found. Use the current checkout for this project.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Branch origin", selection: $selectedBranchID) {
+                            ForEach(branches) { branch in
+                                Text(branch.label).tag(branch.id)
+                            }
+                        }
+                        Toggle("Start from latest origin", isOn: $startFromOrigin)
+                    }
+                } else if let selectedBranch {
+                    LabeledContent("Branch", value: selectedBranch.name)
+                }
+
+                Text(
+                    workspaceMode == .worktree
+                        ? "Creates an isolated worktree before the agent starts."
+                        : "Runs the task in the project's current checkout."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Section("Agent") {
@@ -147,29 +215,191 @@ struct NewTaskView: View {
                 }
             }
         }
+        .disabled(isCreating)
         .navigationTitle("New Task")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel", action: onCancel)
+                Button("Cancel") {
+                    promptDictation.cancel()
+                    onCancel()
+                }
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("Start") { createTask() }
+                Button("Start") { startTask() }
                     .disabled(
                         isCreating
                             || selectedProject == nil
                             || selectedModel == nil
-                            || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || (workspaceMode == .worktree && selectedBranch == nil)
+                            || (!promptDictation.isDictating
+                                && promptDictation.text
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty)
                     )
             }
         }
         .task { configureDefaults() }
+        .task(id: projectID) { await loadBranches() }
         .onChange(of: projectID) { configureModelDefault() }
         .onChange(of: modelID) { configureModelOptions() }
+        .onChange(of: workspaceMode) { selectDefaultBranch() }
+        .onDisappear { promptDictation.cancel() }
+    }
+
+    private var taskDescriptionEditor: some View {
+        @Bindable var promptDictation = promptDictation
+        return VStack(alignment: .leading, spacing: 12) {
+            if let error = promptDictation.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else if let label = promptDictation.phase.label {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(label)
+                            .font(.caption.weight(.semibold))
+                        if !promptDictation.volatileText.isEmpty {
+                            Text(promptDictation.volatileText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    Spacer()
+                    Button("Cancel", role: .destructive) {
+                        promptDictation.cancel()
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .foregroundStyle(.white)
+                }
+            }
+
+            if promptDictation.isDictating {
+                if !promptDictation.previewText.isEmpty {
+                    Text(promptDictation.previewText)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .lineLimit(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            } else {
+                TextField(
+                    "What should the agent do?",
+                    text: $promptDictation.text,
+                    axis: .vertical
+                )
+                .lineLimit(4...12)
+            }
+
+            Button {
+                if promptDictation.isDictating {
+                    promptDictation.finish()
+                } else {
+                    promptDictation.begin(vocabulary: model.dictationVocabulary)
+                }
+            } label: {
+                Image(systemName: promptDictation.isDictating ? "stop.fill" : "mic.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 76, height: 76)
+                    .background(taskMicrophoneColor, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.72), lineWidth: 2)
+                            .padding(5)
+                    }
+                    .contentShape(.interaction, Circle())
+                    .contentShape(.hoverEffect, Circle())
+            }
+            .buttonStyle(.plain)
+            .hoverEffect(.lift)
+            .onHover { microphoneHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: microphoneHovered)
+            .animation(.easeOut(duration: 0.12), value: promptDictation.isDictating)
+            .opacity(isCreating ? 0.4 : 1)
+            .disabled(isCreating)
+            .accessibilityLabel(
+                promptDictation.isDictating ? "Stop task dictation" : "Start task dictation"
+            )
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var taskMicrophoneColor: Color {
+        if promptDictation.isDictating { return .red }
+        if microphoneHovered { return .green }
+        return Color.secondary.opacity(0.45)
     }
 
     private func configureDefaults() {
         if projectID.isEmpty { projectID = projects.first?.id ?? "" }
         configureModelDefault()
+    }
+
+    private func loadBranches(refresh: Bool = false) async {
+        let requestedProjectID = projectID
+        guard !requestedProjectID.isEmpty else { return }
+
+        branchesLoading = true
+        branchLoadError = nil
+        branches = []
+        selectedBranchID = ""
+        do {
+            let loaded = try await model.workspaceBranches(
+                projectID: requestedProjectID,
+                refresh: refresh
+            )
+            guard !Task.isCancelled, projectID == requestedProjectID else { return }
+            branches = loaded.sorted(by: Self.branchSort)
+            if !branches.contains(where: { $0.id == selectedBranchID }) {
+                selectDefaultBranch()
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard projectID == requestedProjectID else { return }
+            branches = []
+            selectedBranchID = ""
+            branchLoadError = error.localizedDescription
+        }
+        guard projectID == requestedProjectID else { return }
+        branchesLoading = false
+    }
+
+    private func selectDefaultBranch() {
+        let branch: VisionWorkspaceBranch? = switch workspaceMode {
+        case .currentCheckout:
+            branches.first { $0.isCurrent }
+                ?? branches.first { $0.isDefault && !$0.isRemote }
+                ?? branches.first { !$0.isRemote }
+                ?? branches.first
+        case .worktree:
+            branches.first { $0.isDefault && !$0.isRemote }
+                ?? branches.first { $0.isCurrent }
+                ?? branches.first { $0.isDefault }
+                ?? branches.first { !$0.isRemote }
+                ?? branches.first
+        }
+        selectedBranchID = branch?.id ?? ""
+    }
+
+    private static func branchSort(
+        _ lhs: VisionWorkspaceBranch,
+        _ rhs: VisionWorkspaceBranch
+    ) -> Bool {
+        let lhsRank = lhs.isCurrent ? 0 : lhs.isDefault ? 1 : lhs.isRemote ? 3 : 2
+        let rhsRank = rhs.isCurrent ? 0 : rhs.isDefault ? 1 : rhs.isRemote ? 3 : 2
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 
     private func configureModelDefault() {
@@ -229,14 +459,36 @@ struct NewTaskView: View {
         booleanOptions = nextBooleans
     }
 
-    private func createTask() {
-        guard !isCreating,
-              let project = selectedProject,
-              let selection = selectedModel else { return }
-        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPrompt.isEmpty else { return }
-
+    private func startTask() {
+        guard !isCreating else { return }
         isCreating = true
+        if promptDictation.isDictating {
+            promptDictation.finish(forSending: true) { finished in
+                guard finished else {
+                    isCreating = false
+                    return
+                }
+                createTask()
+            }
+        } else {
+            createTask()
+        }
+    }
+
+    private func createTask() {
+        guard let project = selectedProject,
+              let selection = selectedModel else {
+            isCreating = false
+            return
+        }
+        let trimmedPrompt = promptDictation.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else {
+            isCreating = false
+            promptDictation.presentError("Dictate or type a task description before starting.")
+            return
+        }
+
         errorMessage = nil
         Task {
             do {
@@ -246,7 +498,10 @@ struct NewTaskView: View {
                     text: trimmedPrompt,
                     model: selection,
                     runtimeMode: RuntimeMode(rawValue: runtimeModeID) ?? .fullAccess,
-                    interactionMode: InteractionMode(rawValue: interactionModeID) ?? .default
+                    interactionMode: InteractionMode(rawValue: interactionModeID) ?? .default,
+                    createWorktree: workspaceMode == .worktree,
+                    baseBranch: selectedBranch?.name,
+                    startFromOrigin: workspaceMode == .worktree && startFromOrigin
                 )
                 onCreated(threadID)
             } catch {
