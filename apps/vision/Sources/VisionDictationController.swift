@@ -247,7 +247,6 @@ final class VisionDictationDraft {
         case preparing(String)
         case listening
         case finishing
-        case finishingToSend
 
         var label: String? {
             switch self {
@@ -255,7 +254,6 @@ final class VisionDictationDraft {
             case let .preparing(label): label
             case .listening: "Listening…"
             case .finishing: "Transcribing on device…"
-            case .finishingToSend: "Finishing speech before sending…"
             }
         }
     }
@@ -344,10 +342,7 @@ final class VisionDictationDraft {
 
     /// Stops capture, waits for the in-flight phrase to finalize, then reports
     /// whether the caller can safely submit the resulting draft.
-    func finish(
-        forSending: Bool = false,
-        onFinished: ((Bool) -> Void)? = nil
-    ) {
+    func finish(onFinished: ((Bool) -> Void)? = nil) {
         if completionAfterFinish == nil {
             completionAfterFinish = onFinished
         }
@@ -357,19 +352,15 @@ final class VisionDictationDraft {
             completion?(errorMessage == nil)
             return
         }
-        guard phase != .finishing, phase != .finishingToSend else { return }
+        guard phase != .finishing else { return }
 
-        phase = forSending ? .finishingToSend : .finishing
+        phase = .finishing
         let preparationTask = lifecycleTask
         lifecycleTask = Task { [weak self] in
             guard let self else { return }
             await preparationTask?.value
             guard isActive else { return }
-            if forSending {
-                await controller.finishForSending()
-            } else {
-                await controller.finish()
-            }
+            await controller.finish()
             guard isActive else { return }
 
             isActive = false
@@ -415,7 +406,7 @@ final class VisionDictationDraft {
     }
 
     private func finishWithError(_ message: String) {
-        let needsCleanup = phase != .finishing && phase != .finishingToSend
+        let needsCleanup = phase != .finishing
         isActive = false
         phase = .idle
         volatileText = ""
@@ -537,17 +528,6 @@ final class VisionDictationController {
         } else {
             Self.logger.error("[utterance \(self.utteranceID, privacy: .public)] no engine produced text")
         }
-        resetUtterance()
-    }
-
-    /// Finalizes Apple's streaming recognizer through the end of microphone
-    /// input, but skips the slower Whisper pass when the user has chosen Send.
-    func finishForSending() async {
-        guard isRunning else { return }
-        isRunning = false
-        await systemController.finish()
-        let text = combinedSystemText
-        if !text.isEmpty { onFinalized?(text) }
         resetUtterance()
     }
 

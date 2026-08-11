@@ -463,7 +463,7 @@ struct NewTaskView: View {
         guard !isCreating else { return }
         isCreating = true
         if promptDictation.isDictating {
-            promptDictation.finish(forSending: true) { finished in
+            promptDictation.finish { finished in
                 guard finished else {
                     isCreating = false
                     return
