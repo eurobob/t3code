@@ -420,8 +420,6 @@ private final class VisionScreenCaptureSession: NSObject,
             onPreparing()
             let configuration = SCStreamConfiguration()
             configuration.capturesAudio = false
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-            configuration.queueDepth = 6
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
             self.stream = stream
