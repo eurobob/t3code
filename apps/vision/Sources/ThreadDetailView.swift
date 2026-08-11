@@ -63,16 +63,18 @@ final class ThreadDetailModel {
 
     enum DictationPhase: Equatable {
         case idle
-        case preparing
+        case preparing(String)
         case listening
         case finishing
+        case finishingToSend
 
         var label: String? {
             switch self {
             case .idle: nil
-            case .preparing: "Preparing dictation…"
+            case let .preparing(label): label
             case .listening: "Listening…"
-            case .finishing: "Finishing dictation…"
+            case .finishing: "Transcribing on device…"
+            case .finishingToSend: "Finishing speech before sending…"
             }
         }
     }
@@ -779,7 +781,7 @@ final class ThreadDetailModel {
         committedDictation = ""
         volatileDictation = ""
         dictationError = nil
-        dictationPhase = .preparing
+        dictationPhase = .preparing("Starting microphone…")
         dictationTask = Task { [weak self] in
             guard let self else { return }
             let granted = await VisionDictationController.requestPermission()
@@ -796,7 +798,7 @@ final class ThreadDetailModel {
                     await dictationController.cancel()
                     return
                 }
-                if dictationPhase == .preparing { dictationPhase = .listening }
+                if case .preparing = dictationPhase { dictationPhase = .listening }
             } catch is CancellationError {
                 return
             } catch {
@@ -824,14 +826,24 @@ final class ThreadDetailModel {
             }
             return
         }
-        guard dictationPhase != .finishing else { return }
-        dictationPhase = .finishing
+        guard dictationPhase != .finishing,
+              dictationPhase != .finishingToSend else { return }
+        dictationPhase = appModel == nil ? .finishing : .finishingToSend
         let preparationTask = dictationTask
         dictationTask = Task { [weak self] in
             guard let self else { return }
             await preparationTask?.value
             guard dictationActive else { return }
-            await dictationController.finish()
+            if submitAfterDictationAppModel == nil {
+                await dictationController.finish()
+            } else {
+                await dictationController.finishForSending()
+            }
+            guard dictationActive else {
+                dictationTask = nil
+                submitAfterDictationAppModel = nil
+                return
+            }
             dictationActive = false
             volatileDictation = ""
             committedDictation = ""
