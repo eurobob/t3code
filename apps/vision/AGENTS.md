@@ -275,12 +275,6 @@ product vocabulary only. Project and branch vocabulary belongs in
 SpeechAnalyzer's context because feeding it to the Whisper decoder can cause
 branch-name hallucinations.
 
-Dictation diagnostics are also kept in a bounded, privacy-safe in-memory log.
-Once model preparation completes or fails, the voice dock exposes a Copy
-diagnostics action so device owners can share cache, Core ML timing, and engine
-selection evidence without coordinating a remote live capture. Never include
-recognized speech or model paths in that copied log.
-
 Large v3 deliberately keeps WhisperKit's CPU+Neural Engine defaults. On the M2
 Vision Pro with visionOS 27, its audio encoder can spend about 151 seconds
 loading or specializing on a development launch. Base remains the usable

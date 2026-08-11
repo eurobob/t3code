@@ -1382,7 +1382,6 @@ struct ThreadDetailView: View {
     @SwiftUI.Environment(AppModel.self) private var appModel
     @AppStorage("vision.tasks.showsSummaryPanel") private var showsSummaryPanel = false
     @State private var model: ThreadDetailModel
-    @State private var dictationService = VisionWhisperKitService.shared
     @State private var draftEditorMode = DraftEditorMode.hidden
     @State private var prefersHardwareEditor = false
     @State private var dictationBaseline = ""
@@ -1391,7 +1390,6 @@ struct ThreadDetailView: View {
     @State private var followsTranscriptBottom = true
     @State private var transcriptIsAtBottom = true
     @State private var showsDeployError = false
-    @State private var diagnosticsCopied = false
 
     init(threadID: String) {
         _model = State(initialValue: ThreadDetailModel(threadID: threadID))
@@ -1414,7 +1412,6 @@ struct ThreadDetailView: View {
         }
         .navigationTitle("")
         .task { await model.start(using: appModel) }
-        .task { await dictationService.prepareIfNeeded() }
         .onChange(of: model.isDictating) {
             if !model.isDictating, model.draft != dictationBaseline {
                 prefersHardwareEditor = true
@@ -1822,57 +1819,11 @@ struct ThreadDetailView: View {
                     .tint(.red)
                     .foregroundStyle(.white)
                 }
-            } else if let label = dictationService.statusLabel {
-                HStack(spacing: 8) {
-                    if dictationService.state.isPreparing {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                    Text(label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(
-                            dictationService.state.isFailure
-                                ? Color.red
-                                : Color.secondary
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if dictationService.state.isFailure {
-                        Button("Retry") {
-                            Task { await dictationService.retry() }
-                        }
-                        .font(.caption.weight(.semibold))
-                        .buttonStyle(.bordered)
-                    }
-                }
             } else if let notice = model.actionNotice {
                 Text(notice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if dictationService.diagnosticsAvailable {
-                HStack(spacing: 8) {
-                    Label(
-                        dictationService.state == .ready
-                            ? "WhisperKit models ready"
-                            : "Dictation diagnostics ready",
-                        systemImage: "doc.text.magnifyingglass"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Button(diagnosticsCopied ? "Copied" : "Copy diagnostics") {
-                        UIPasteboard.general.string =
-                            VisionDictationDiagnostics.shared.copyableText
-                        diagnosticsCopied = true
-                    }
-                    .font(.caption.weight(.semibold))
-                    .buttonStyle(.bordered)
-                }
             }
 
             if model.isDictating, !voicePreview.isEmpty {

@@ -8,9 +8,9 @@ vocabulary to Apple's streaming recognizer, while WhisperKit gets a smaller,
 stable product vocabulary so branch names cannot be hallucinated from its
 decoder prompt.
 
-WhisperKit begins preparing when T3 Vision launches. The composer reports cache
-checking, download progress, model loading, or a preparation failure, but the
-record control remains available throughout.
+WhisperKit begins preparing when T3 Vision launches without adding model status
+or download controls to the composer. The record control remains available
+throughout.
 
 Select the microphone in the composer once to start recording and again to
 stop. The dictation panel first shows system partial results. When a WhisperKit
@@ -34,9 +34,3 @@ loaded for subsequent dictation during that app session.
 Base remains available while Large v3 prepares entirely in the background using
 WhisperKit's Neural Engine defaults. Large may take several minutes to specialize
 on a development build, but once ready it remains loaded for that app session.
-
-When model preparation completes or fails, the voice dock offers **Copy
-diagnostics**. It copies a bounded on-device history of cache checks, downloads,
-Core ML load timings, and transcription-engine decisions that can be pasted into
-a support conversation. Recognized speech and model paths are deliberately
-excluded.

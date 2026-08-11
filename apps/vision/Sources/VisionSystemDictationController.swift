@@ -64,9 +64,6 @@ final class VisionSystemDictationController {
         Self.logger.notice(
             "[system] preparing SpeechAnalyzer for \(locale.identifier, privacy: .public) with \(contextualStrings.count, privacy: .public) context entries"
         )
-        Self.recordDiagnostic(
-            "System dictation: preparing \(locale.identifier) with \(contextualStrings.count) context entries"
-        )
 
         let transcriber = SpeechTranscriber(
             locale: locale,
@@ -81,17 +78,12 @@ final class VisionSystemDictationController {
         if let installation = try await AssetInventory.assetInstallationRequest(
             supporting: [transcriber]
         ) {
-            Self.recordDiagnostic("System dictation: speech assets installation started")
             Self.logger.notice("[system] SpeechAnalyzer asset installation started")
             try await installation.downloadAndInstall()
-            Self.recordDiagnostic(
-                "System dictation: speech assets installed in \(Self.secondsSince(assetsStartedAt))s"
-            )
             Self.logger.notice(
                 "[system] SpeechAnalyzer asset installation finished in \(Date().timeIntervalSince(assetsStartedAt), format: .fixed(precision: 2))s"
             )
         } else {
-            Self.recordDiagnostic("System dictation: speech assets already available")
             Self.logger.notice("[system] SpeechAnalyzer assets already available")
         }
 
@@ -144,7 +136,6 @@ final class VisionSystemDictationController {
         try await analyzer.start(inputSequence: inputs)
         try startCapture()
         isRunning = true
-        Self.recordDiagnostic("System dictation: analyzer and audio engine started")
         Self.logger.notice("[system] SpeechAnalyzer and audio engine started")
     }
 
@@ -158,7 +149,6 @@ final class VisionSystemDictationController {
         await pendingResults?.value
         resultsTask = nil
         await teardown()
-        Self.recordDiagnostic("System dictation: finalized and stopped")
         Self.logger.notice("[system] SpeechAnalyzer finalized and stopped")
     }
 
@@ -292,13 +282,4 @@ final class VisionSystemDictationController {
         )
     }
 
-    private static func recordDiagnostic(_ message: String) {
-        Task { @MainActor in
-            VisionDictationDiagnostics.shared.record(message)
-        }
-    }
-
-    private static func secondsSince(_ date: Date) -> String {
-        String(format: "%.2f", Date().timeIntervalSince(date))
-    }
 }
