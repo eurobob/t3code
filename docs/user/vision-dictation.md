@@ -31,10 +31,9 @@ upgrade is roughly 626 MB. Later launches reuse both device caches, although the
 app still loads each model into memory after launch. Prepared models remain
 loaded for subsequent dictation during that app session.
 
-Large v3 uses the GPU for its audio encoder because the Neural Engine encoder
-can spend minutes specializing on Vision Pro development builds. Its text
-decoder remains on the Neural Engine. Base retains WhisperKit's default compute
-route.
+Base remains available while Large v3 prepares entirely in the background using
+WhisperKit's Neural Engine defaults. Large may take several minutes to specialize
+on a development build, but once ready it remains loaded for that app session.
 
 When model preparation completes or fails, the voice dock offers **Copy
 diagnostics**. It copies a bounded on-device history of cache checks, downloads,

@@ -1,5 +1,4 @@
 import AVFoundation
-import CoreML
 import Foundation
 import Observation
 import OSLog
@@ -302,10 +301,8 @@ final class VisionWhisperKitService {
         let previousDescription = previousLoad > 0
             ? "; previous load was \(String(format: "%.2f", previousLoad))s"
             : ""
-        let usesGPUEncoder = spec.variant == VisionWhisperKitModelSpec.large.variant
-        let encoderComputeDescription = usesGPUEncoder ? "CPU+GPU" : "CPU+ANE"
         Self.recordDiagnostic(
-            "\(spec.displayName): Core ML load started with Mel CPU+GPU, encoder \(encoderComputeDescription), decoder CPU+ANE\(previousDescription)"
+            "\(spec.displayName): Core ML load started with Mel CPU+GPU, encoder CPU+ANE, decoder CPU+ANE\(previousDescription)"
         )
         Self.logger.notice("[model] \(spec.displayName, privacy: .public) Core ML load started")
         let slowLoadingTask = Task { @MainActor [weak self] in
@@ -316,15 +313,8 @@ final class VisionWhisperKitService {
         }
         defer { slowLoadingTask.cancel() }
 
-        let computeOptions = usesGPUEncoder
-            ? ModelComputeOptions(
-                audioEncoderCompute: .cpuAndGPU,
-                textDecoderCompute: .cpuAndNeuralEngine
-            )
-            : nil
         let whisperKit = try await WhisperKit(WhisperKitConfig(
             modelFolder: modelFolder.path,
-            computeOptions: computeOptions,
             verbose: false,
             prewarm: false,
             load: false,

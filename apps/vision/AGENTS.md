@@ -281,11 +281,11 @@ diagnostics action so device owners can share cache, Core ML timing, and engine
 selection evidence without coordinating a remote live capture. Never include
 recognized speech or model paths in that copied log.
 
-Large v3 deliberately routes only its audio encoder to CPU+GPU. On the M2 Vision
-Pro with visionOS 27, the default CPU+Neural Engine route spent about 151 seconds
-loading or specializing that component on repeated development launches, while
-the decoder took about eight seconds. Keep the decoder on CPU+Neural Engine and
-Base on WhisperKit defaults unless newer measurements justify changing them.
+Large v3 deliberately keeps WhisperKit's CPU+Neural Engine defaults. On the M2
+Vision Pro with visionOS 27, its audio encoder can spend about 151 seconds
+loading or specializing on a development launch. Base remains the usable
+WhisperKit tier during that background wait; do not add a GPU Large stage or a
+duplicate encoder unless new evidence justifies the extra complexity and memory.
 
 Cancel rolls back only if the draft still ends with exactly what dictation
 appended, so a mid-dictation edit is never eaten. The composer continues to
