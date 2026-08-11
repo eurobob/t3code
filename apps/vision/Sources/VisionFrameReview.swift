@@ -424,8 +424,8 @@ private final class VisionFrameReviewModel {
         ) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                currentTime = min(duration, max(0, time.seconds))
-                isPlaying = player.rate != 0
+                self.currentTime = min(self.duration, max(0, time.seconds))
+                self.isPlaying = self.player.rate != 0
             }
         }
     }
