@@ -15,6 +15,38 @@ private enum VisionSelection: Hashable {
     case newProject(UUID)
 }
 
+private enum ThreadListActivity: Int {
+    case needsYou
+    case working
+    case error
+    case updated
+    case ready
+    case completed
+}
+
+private func threadListActivity(
+    for thread: OrchestrationThreadShell,
+    hasUnread: Bool
+) -> ThreadListActivity {
+    if thread.hasPendingApprovals || thread.hasPendingUserInput {
+        return .needsYou
+    }
+    if let status = thread.session?.status,
+       status == "starting" || status == "running" {
+        return .working
+    }
+    if thread.session?.status == "error" {
+        return .error
+    }
+    if hasUnread {
+        return .updated
+    }
+    if thread.settledAt != nil {
+        return .completed
+    }
+    return .ready
+}
+
 struct ThreadListView: View {
     @SwiftUI.Environment(AppModel.self) private var model
 
@@ -340,6 +372,18 @@ struct ThreadListView: View {
             ($0.element, $0.offset)
         })
         return threads.sorted { left, right in
+            let leftActivity = threadListActivity(
+                for: left,
+                hasUnread: hasUnreadUpdate(left)
+            )
+            let rightActivity = threadListActivity(
+                for: right,
+                hasUnread: hasUnreadUpdate(right)
+            )
+            if leftActivity != rightActivity {
+                return leftActivity.rawValue < rightActivity.rawValue
+            }
+
             switch (order[left.id], order[right.id]) {
             case let (leftIndex?, rightIndex?):
                 return leftIndex < rightIndex
@@ -351,8 +395,40 @@ struct ThreadListView: View {
                 if (left.pinnedAt != nil) != (right.pinnedAt != nil) {
                     return left.pinnedAt != nil
                 }
-                return left.updatedAt > right.updatedAt
+                let leftRecency = stableRecency(for: left, activity: leftActivity)
+                let rightRecency = stableRecency(for: right, activity: rightActivity)
+                if leftRecency != rightRecency {
+                    return leftRecency > rightRecency
+                }
+                return left.id < right.id
             }
+        }
+    }
+
+    /// Uses the event that meaningfully placed a task in its current lane.
+    /// In particular, working tasks follow the user's dispatch rather than
+    /// continuously changing agent activity timestamps.
+    private func stableRecency(
+        for thread: OrchestrationThreadShell,
+        activity: ThreadListActivity
+    ) -> String {
+        switch activity {
+        case .needsYou:
+            return thread.updatedAt
+        case .working:
+            return thread.latestUserMessageAt
+                ?? thread.latestTurn?.requestedAt
+                ?? thread.createdAt
+        case .error:
+            return thread.session?.updatedAt
+                ?? thread.latestTurn?.completedAt
+                ?? thread.updatedAt
+        case .updated:
+            return thread.latestTurn?.completedAt ?? thread.updatedAt
+        case .ready, .completed:
+            return thread.latestUserMessageAt
+                ?? thread.latestTurn?.completedAt
+                ?? thread.createdAt
         }
     }
 
@@ -494,27 +570,24 @@ private struct ThreadRow: View {
     }
 
     private var statusPresentation: ThreadStatusPresentation {
-        if thread.hasPendingApprovals || thread.hasPendingUserInput {
+        switch threadListActivity(for: thread, hasUnread: hasUnread) {
+        case .needsYou:
             return .init(title: "Needs You", systemImage: "exclamationmark", color: .orange)
-        }
-        if let status = thread.session?.status,
-           status == "starting" || status == "running" {
+        case .working:
             return .init(title: "Working", systemImage: "ellipsis", color: .blue)
-        }
-        if thread.session?.status == "error" {
+        case .error:
             return .init(
                 title: "Error",
                 systemImage: "exclamationmark.triangle.fill",
                 color: .red
             )
-        }
-        if hasUnread {
+        case .updated:
             return .init(title: "Updated", systemImage: "circle.fill", color: .blue)
-        }
-        if thread.settledAt != nil {
+        case .completed:
             return .init(title: "Complete", systemImage: "checkmark", color: .secondary)
+        case .ready:
+            return .init(title: "Ready", systemImage: "circle", color: .secondary)
         }
-        return .init(title: "Ready", systemImage: "circle", color: .secondary)
     }
 }
 

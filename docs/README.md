@@ -9,6 +9,7 @@
 - [Keeping app and server in sync](./user/updating.md)
 - [Source control integrations](./user/source-control.md)
 - [Background service (Linux)](./user/background-service.md)
+- [Conversations in T3 Vision](./user/vision-conversations.md)
 - [AI task summaries in T3 Vision](./user/vision-task-summaries.md)
 - [Dictating in T3 Vision](./user/vision-dictation.md)
 - Providers: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md)
