@@ -185,6 +185,11 @@ private struct VisionFrameReviewEditorView: View {
                 errorMessage = error.localizedDescription
             }
         }
+        .onDisappear {
+            if controller.session?.id == session.id {
+                controller.cancel()
+            }
+        }
         .alert(
             "Couldn’t capture frame",
             isPresented: Binding(
@@ -382,6 +387,7 @@ private final class VisionFrameReviewModel {
 
     private(set) var duration = 0.0
     private(set) var frameRate = 30.0
+    private(set) var frameTimes: [CMTime] = []
     private(set) var currentTime = 0.0
     private(set) var selectedFrames: [VisionSelectedFrame] = []
     private(set) var isReady = false
@@ -403,9 +409,9 @@ private final class VisionFrameReviewModel {
         }
     }
 
-    var frameCount: Int { max(1, Int((duration * frameRate).rounded(.down))) }
+    var frameCount: Int { max(1, frameTimes.count) }
     var currentFrameIndex: Int {
-        min(frameCount - 1, max(0, Int((currentTime * frameRate).rounded())))
+        nearestFrameIndex(to: currentTime)
     }
     var progress: Double { duration > 0 ? min(1, max(0, currentTime / duration)) : 0 }
     var selectionIsFull: Bool { selectedFrames.count >= session.maximumSelectionCount }
@@ -417,6 +423,8 @@ private final class VisionFrameReviewModel {
         let loadedFrameRate = try await track.load(.nominalFrameRate)
         duration = max(0, loadedDuration.seconds)
         frameRate = loadedFrameRate > 0 ? Double(loadedFrameRate) : 30
+        frameTimes = try await Self.loadFrameTimes(from: session.url)
+        guard !frameTimes.isEmpty else { throw VisionFrameReviewError.noVideoTrack }
         isReady = true
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(value: 1, timescale: 30),
@@ -431,6 +439,7 @@ private final class VisionFrameReviewModel {
     }
 
     func togglePlayback() {
+        guard isReady else { return }
         if player.rate == 0 {
             if currentTime >= duration - (1 / frameRate) { seek(to: 0) }
             player.play()
@@ -446,7 +455,9 @@ private final class VisionFrameReviewModel {
     }
 
     func move(byFrames frames: Int) {
-        seek(to: Double(currentFrameIndex + frames) / frameRate)
+        guard !frameTimes.isEmpty else { return }
+        let index = min(frameTimes.count - 1, max(0, currentFrameIndex + frames))
+        seek(toFrameAt: index)
     }
 
     func seek(toProgress progress: Double) {
@@ -454,16 +465,40 @@ private final class VisionFrameReviewModel {
     }
 
     func seek(to seconds: TimeInterval) {
+        guard !frameTimes.isEmpty else { return }
         pause()
-        let frame = min(frameCount - 1, max(0, Int((seconds * frameRate).rounded())))
-        let resolved = Double(frame) / frameRate
+        seek(toFrameAt: nearestFrameIndex(to: seconds))
+    }
+
+    private func seek(toFrameAt index: Int) {
+        let resolvedTime = frameTimes[min(frameTimes.count - 1, max(0, index))]
+        let resolved = resolvedTime.seconds
         currentTime = resolved
         player.currentItem?.cancelPendingSeeks()
         player.seek(
-            to: CMTime(seconds: resolved, preferredTimescale: 60_000),
+            to: resolvedTime,
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+    }
+
+    private func nearestFrameIndex(to seconds: TimeInterval) -> Int {
+        guard frameTimes.count > 1 else { return 0 }
+        var lower = 0
+        var upper = frameTimes.count
+        while lower < upper {
+            let middle = (lower + upper) / 2
+            if frameTimes[middle].seconds < seconds {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower > 0 else { return 0 }
+        guard lower < frameTimes.count else { return frameTimes.count - 1 }
+        let before = frameTimes[lower - 1].seconds
+        let after = frameTimes[lower].seconds
+        return seconds - before <= after - seconds ? lower - 1 : lower
     }
 
     func timeLabel(_ seconds: TimeInterval) -> String {
@@ -475,10 +510,11 @@ private final class VisionFrameReviewModel {
         isExtracting = true
         defer { isExtracting = false }
         let frameIndex = currentFrameIndex
-        let time = Double(frameIndex) / frameRate
+        let frameTime = frameTimes[frameIndex]
+        let time = frameTime.seconds
         let data = try await Self.extractJPEG(
             from: asset,
-            at: CMTime(seconds: time, preferredTimescale: 60_000)
+            at: frameTime
         )
         let prepared = try await Task.detached(priority: .userInitiated) {
             try VisionImageProcessor.attachment(from: data, ordinal: frameIndex + 1)
@@ -524,7 +560,8 @@ private final class VisionFrameReviewModel {
         generator.requestedTimeToleranceAfter = .zero
         let image = try await withCheckedThrowingContinuation { continuation in
             generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) {
-                _, image, _, result, error in
+                [generator] _, image, _, result, error in
+                _ = generator
                 if result == .succeeded, let image {
                     continuation.resume(returning: image)
                 } else {
@@ -536,5 +573,33 @@ private final class VisionFrameReviewModel {
             throw VisionFrameReviewError.frameExtractionFailed
         }
         return data
+    }
+
+    private static func loadFrameTimes(from url: URL) async throws -> [CMTime] {
+        try await Task.detached(priority: .userInitiated) {
+            let asset = AVURLAsset(url: url)
+            let tracks = try await asset.loadTracks(withMediaType: .video)
+            guard let track = tracks.first else { throw VisionFrameReviewError.noVideoTrack }
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            output.alwaysCopiesSampleData = false
+            guard reader.canAdd(output) else { throw VisionFrameReviewError.noVideoTrack }
+            reader.add(output)
+            guard reader.startReading() else {
+                throw reader.error ?? VisionFrameReviewError.noVideoTrack
+            }
+
+            var times: [CMTime] = []
+            while let sampleBuffer = output.copyNextSampleBuffer() {
+                let time = sampleBuffer.presentationTimeStamp
+                if time.isValid, time.isNumeric {
+                    times.append(time)
+                }
+            }
+            if reader.status == .failed {
+                throw reader.error ?? VisionFrameReviewError.noVideoTrack
+            }
+            return times
+        }.value
     }
 }
