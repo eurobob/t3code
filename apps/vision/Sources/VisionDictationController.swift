@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Observation
 import OSLog
 import WhisperKit
 
@@ -232,6 +233,202 @@ final class VisionWhisperKitService {
             )
         }
         return hasRequiredModels ? folder : nil
+    }
+}
+
+/// Owns the text and lifecycle for a draft that accepts speech. Keeping this
+/// separate from any one composer gives task creation and thread steering the
+/// same finalized-text, preview, and cancel behavior.
+@MainActor
+@Observable
+final class VisionDictationDraft {
+    enum Phase: Equatable {
+        case idle
+        case preparing(String)
+        case listening
+        case finishing
+        case finishingToSend
+
+        var label: String? {
+            switch self {
+            case .idle: nil
+            case let .preparing(label): label
+            case .listening: "Listening…"
+            case .finishing: "Transcribing on device…"
+            case .finishingToSend: "Finishing speech before sending…"
+            }
+        }
+    }
+
+    var text: String
+    private(set) var phase = Phase.idle
+    private(set) var volatileText = ""
+    private(set) var errorMessage: String?
+
+    @ObservationIgnored
+    private let controller: VisionDictationController
+    @ObservationIgnored
+    private var lifecycleTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var isActive = false
+    @ObservationIgnored
+    private var committedText = ""
+    @ObservationIgnored
+    private var completionAfterFinish: ((Bool) -> Void)?
+
+    init(text: String = "") {
+        self.text = text
+        let controller = VisionDictationController()
+        self.controller = controller
+        controller.onVolatile = { [weak self] text in
+            guard self?.isActive == true else { return }
+            self?.volatileText = text
+        }
+        controller.onFinalized = { [weak self] text in
+            self?.commitFinalizedPhrase(text)
+        }
+        controller.onError = { [weak self] message in
+            self?.finishWithError(message)
+        }
+    }
+
+    var isDictating: Bool { phase != .idle }
+
+    var previewText: String {
+        let committed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let volatile = volatileText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if committed.isEmpty { return volatile }
+        if volatile.isEmpty { return committed }
+        return "\(committed) \(volatile)"
+    }
+
+    func presentError(_ message: String) {
+        errorMessage = message
+    }
+
+    func begin(vocabulary: [String]) {
+        guard !isActive else { return }
+
+        isActive = true
+        committedText = ""
+        volatileText = ""
+        errorMessage = nil
+        phase = .preparing("Starting microphone…")
+        let previousTask = lifecycleTask
+        lifecycleTask = Task { [weak self] in
+            guard let self else { return }
+            await previousTask?.value
+            guard !Task.isCancelled, isActive else { return }
+            let granted = await VisionDictationController.requestPermission()
+            guard !Task.isCancelled, isActive else { return }
+            guard granted else {
+                finishWithError(
+                    VisionDictationError.microphonePermissionDenied.localizedDescription
+                )
+                return
+            }
+            do {
+                try await controller.start(contextualStrings: vocabulary)
+                guard isActive else {
+                    await controller.cancel()
+                    return
+                }
+                if case .preparing = phase { phase = .listening }
+            } catch is CancellationError {
+                return
+            } catch {
+                finishWithError(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Stops capture, waits for the in-flight phrase to finalize, then reports
+    /// whether the caller can safely submit the resulting draft.
+    func finish(
+        forSending: Bool = false,
+        onFinished: ((Bool) -> Void)? = nil
+    ) {
+        if completionAfterFinish == nil {
+            completionAfterFinish = onFinished
+        }
+        guard isActive else {
+            let completion = completionAfterFinish
+            completionAfterFinish = nil
+            completion?(errorMessage == nil)
+            return
+        }
+        guard phase != .finishing, phase != .finishingToSend else { return }
+
+        phase = forSending ? .finishingToSend : .finishing
+        let preparationTask = lifecycleTask
+        lifecycleTask = Task { [weak self] in
+            guard let self else { return }
+            await preparationTask?.value
+            guard isActive else { return }
+            if forSending {
+                await controller.finishForSending()
+            } else {
+                await controller.finish()
+            }
+            guard isActive else { return }
+
+            isActive = false
+            volatileText = ""
+            committedText = ""
+            phase = .idle
+            lifecycleTask = nil
+            let completion = completionAfterFinish
+            completionAfterFinish = nil
+            completion?(true)
+        }
+    }
+
+    func cancel() {
+        guard isActive || phase != .idle else { return }
+        isActive = false
+        lifecycleTask?.cancel()
+        let controller = controller
+        lifecycleTask = Task {
+            await controller.cancel()
+        }
+        volatileText = ""
+        phase = .idle
+        let completion = completionAfterFinish
+        completionAfterFinish = nil
+
+        if !committedText.isEmpty, text.hasSuffix(committedText) {
+            text.removeLast(committedText.count)
+        }
+        committedText = ""
+        completion?(false)
+    }
+
+    private func commitFinalizedPhrase(_ phrase: String) {
+        guard isActive else { return }
+        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let separator = text.isEmpty || text.last?.isWhitespace == true ? "" : " "
+        let appended = separator + trimmed
+        text += appended
+        committedText += appended
+        volatileText = ""
+    }
+
+    private func finishWithError(_ message: String) {
+        let needsCleanup = phase != .finishing && phase != .finishingToSend
+        isActive = false
+        phase = .idle
+        volatileText = ""
+        errorMessage = message
+        let completion = completionAfterFinish
+        completionAfterFinish = nil
+        completion?(false)
+        if needsCleanup {
+            let controller = controller
+            lifecycleTask = Task {
+                await controller.cancel()
+            }
+        }
     }
 }
 

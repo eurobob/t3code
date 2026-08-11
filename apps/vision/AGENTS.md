@@ -94,6 +94,13 @@ live thread detail from `threadEvents`, sending turns, explicit interrupt,
 client-side steering, tap-to-record dictation, project and task creation, task
 organization, and one data-driven spatial window per thread.
 
+New-task descriptions use the same tap-to-record dictation lifecycle as thread
+instructions. Starting a task while recording first finalizes the in-flight
+phrase, then creates the thread from the completed description.
+New tasks default to an isolated worktree. The creation form can instead use the
+current checkout, and worktree tasks expose both their base branch and whether
+to start from the latest origin state.
+
 The task sidebar is flat by default, can optionally group by project, and keeps
 project names subordinate as row pretitles or inert section headers. Completed
 tasks always move into a dedicated section at the bottom, including when the

@@ -50,6 +50,20 @@ private struct ThreadDetailCache {
     }
 }
 
+struct VisionWorkspaceBranch: Identifiable, Equatable {
+    let name: String
+    let isRemote: Bool
+    let isCurrent: Bool
+    let isDefault: Bool
+    let worktreePath: String?
+
+    var id: String { "\(isRemote ? "remote" : "local"):\(name)" }
+
+    var label: String {
+        isRemote ? "\(name) · Remote" : name
+    }
+}
+
 /// Owns the connection for the whole app.
 ///
 /// Deliberately thin: `T3ConnectController`, `EnvironmentRuntime` and `T3Client`
@@ -61,11 +75,17 @@ private struct ThreadDetailCache {
 final class AppModel {
     enum ClientError: LocalizedError {
         case notConnected
+        case projectUnavailable
+        case worktreeBranchRequired
 
         var errorDescription: String? {
             switch self {
             case .notConnected:
                 "T3 Vision is not connected to an environment."
+            case .projectUnavailable:
+                "That project is no longer available."
+            case .worktreeBranchRequired:
+                "Choose a branch to create the worktree from."
             }
         }
     }
@@ -533,10 +553,23 @@ final class AppModel {
         text: String,
         model: ModelSelection,
         runtimeMode: RuntimeMode,
-        interactionMode: InteractionMode
+        interactionMode: InteractionMode,
+        createWorktree: Bool,
+        baseBranch: String?,
+        startFromOrigin: Bool
     ) async throws -> String {
         guard let client else { throw ClientError.notConnected }
+        guard let project = snapshot?.projects.first(where: { $0.id == projectID }) else {
+            throw ClientError.projectUnavailable
+        }
+        let branch = baseBranch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !createWorktree || branch?.isEmpty == false else {
+            throw ClientError.worktreeBranchRequired
+        }
         let threadID = UUID().uuidString
+        let worktreeBranch = createWorktree
+            ? "t3code/\(threadID.prefix(8).lowercased())"
+            : nil
         _ = try await client.createThreadAndSend(
             threadID: threadID,
             projectID: projectID,
@@ -544,9 +577,59 @@ final class AppModel {
             text: text,
             model: model,
             runtimeMode: runtimeMode,
-            interactionMode: interactionMode
+            interactionMode: interactionMode,
+            branch: branch,
+            worktreePreparation: worktreeBranch.flatMap { generatedBranch in
+                branch.map { baseBranch in
+                    ThreadWorktreePreparation(
+                        projectCwd: project.workspaceRoot,
+                        baseBranch: baseBranch,
+                        branch: generatedBranch,
+                        startFromOrigin: startFromOrigin
+                    )
+                }
+            }
         )
         return threadID
+    }
+
+    func workspaceBranches(
+        projectID: String,
+        refresh: Bool = false
+    ) async throws -> [VisionWorkspaceBranch] {
+        guard let client else { throw ClientError.notConnected }
+        guard let project = snapshot?.projects.first(where: { $0.id == projectID }) else {
+            throw ClientError.projectUnavailable
+        }
+
+        var refs: [VCSRef] = []
+        var cursor: Int?
+        var seenCursors: Set<Int> = []
+        repeat {
+            let result = try await client.listVCSRefs(
+                cwd: project.workspaceRoot,
+                cursor: cursor,
+                refresh: refresh && cursor == nil,
+                limit: 100
+            )
+            guard result.isRepo else { return [] }
+            refs.append(contentsOf: result.refs)
+            guard let nextCursor = result.nextCursor,
+                  seenCursors.insert(nextCursor).inserted else {
+                break
+            }
+            cursor = nextCursor
+        } while true
+
+        return refs.map { ref in
+            VisionWorkspaceBranch(
+                name: ref.name,
+                isRemote: ref.isRemote ?? false,
+                isCurrent: ref.current,
+                isDefault: ref.isDefault,
+                worktreePath: ref.worktreePath
+            )
+        }
     }
 
     func createProject(
