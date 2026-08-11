@@ -61,22 +61,6 @@ final class ThreadDetailModel {
         }
     }
 
-    enum DictationPhase: Equatable {
-        case idle
-        case preparing
-        case listening
-        case finishing
-
-        var label: String? {
-            switch self {
-            case .idle: nil
-            case .preparing: "Preparing dictation…"
-            case .listening: "Listening…"
-            case .finishing: "Finishing dictation…"
-            }
-        }
-    }
-
     enum ScriptActionState: Equatable {
         case idle
         case starting
@@ -184,9 +168,6 @@ final class ThreadDetailModel {
     private(set) var actionState: ActionState = .idle
     private(set) var actionError: String?
     private(set) var actionNotice: String?
-    private(set) var dictationPhase: DictationPhase = .idle
-    private(set) var volatileDictation = ""
-    private(set) var dictationError: String?
     private(set) var scriptActionState: ScriptActionState = .idle
     private(set) var scriptOutput = ""
     private(set) var scriptOutputWasTruncated = false
@@ -197,8 +178,8 @@ final class ThreadDetailModel {
     private(set) var generatedSummaryRevision: String?
     private(set) var summaryIsLoading = false
     private(set) var summaryError: String?
-    var draft = ""
     var attachments: [VisionDraftAttachment] = []
+    let dictation = VisionDictationDraft()
 
     @ObservationIgnored
     private var eventsTask: Task<Void, Never>?
@@ -213,39 +194,28 @@ final class ThreadDetailModel {
     @ObservationIgnored
     private var refreshGeneration = 0
     @ObservationIgnored
-    private let dictationController: VisionDictationController
-    @ObservationIgnored
-    private var dictationTask: Task<Void, Never>?
-    @ObservationIgnored
-    private var dictationActive = false
-    @ObservationIgnored
-    private var committedDictation = ""
-    @ObservationIgnored
     private var turnBeforeSubmissionID: String?
-    @ObservationIgnored
-    private weak var submitAfterDictationAppModel: AppModel?
 
     init(threadID: String) {
         self.threadID = threadID
-        let dictationController = VisionDictationController()
-        self.dictationController = dictationController
-        dictationController.onVolatile = { [weak self] text in
-            guard self?.dictationActive == true else { return }
-            self?.volatileDictation = text
-        }
-        dictationController.onFinalized = { [weak self] text in
-            self?.commitDictatedPhrase(text)
-        }
-        dictationController.onError = { [weak self] message in
-            self?.finishDictationWithError(message)
-        }
     }
 
     var thread: OrchestrationThread? { detail?.thread }
 
     var isBusy: Bool { actionState != .idle }
 
-    var isDictating: Bool { dictationPhase != .idle }
+    var draft: String {
+        get { dictation.text }
+        set { dictation.text = newValue }
+    }
+
+    var dictationPhase: VisionDictationDraft.Phase { dictation.phase }
+
+    var volatileDictation: String { dictation.volatileText }
+
+    var dictationError: String? { dictation.errorMessage }
+
+    var isDictating: Bool { dictation.isDictating }
 
     var isScriptRunning: Bool { scriptActionState.isRunning }
 
@@ -368,7 +338,7 @@ final class ThreadDetailModel {
         actionTask = nil
         scriptTask?.cancel()
         scriptTask = nil
-        cancelDictation()
+        dictation.cancel()
     }
 
     func ensureTaskSummary(using appModel: AppModel, force: Bool = false) async {
@@ -777,95 +747,25 @@ final class ThreadDetailModel {
 
     func beginDictation(vocabulary: [String]) {
         guard !isBusy else {
-            dictationError = "Wait for the current thread action to finish."
+            dictation.presentError("Wait for the current thread action to finish.")
             return
         }
-        guard !dictationActive else { return }
-
-        dictationActive = true
-        committedDictation = ""
-        volatileDictation = ""
-        dictationError = nil
-        dictationPhase = .preparing
-        dictationTask = Task { [weak self] in
-            guard let self else { return }
-            let granted = await VisionDictationController.requestPermission()
-            guard !Task.isCancelled, dictationActive else { return }
-            guard granted else {
-                finishDictationWithError(
-                    VisionDictationError.microphonePermissionDenied.localizedDescription
-                )
-                return
-            }
-            do {
-                try await dictationController.start(contextualStrings: vocabulary)
-                guard dictationActive else {
-                    await dictationController.cancel()
-                    return
-                }
-                if dictationPhase == .preparing { dictationPhase = .listening }
-            } catch is CancellationError {
-                return
-            } catch {
-                finishDictationWithError(error.localizedDescription)
-            }
-        }
+        dictation.begin(vocabulary: vocabulary)
     }
 
     func finishDictation() {
-        finishDictation(submitUsing: nil)
+        dictation.finish()
     }
 
     func finishDictationAndSubmit(using appModel: AppModel) {
-        finishDictation(submitUsing: appModel)
-    }
-
-    private func finishDictation(submitUsing appModel: AppModel?) {
-        if let appModel {
-            submitAfterDictationAppModel = appModel
-        }
-        guard dictationActive else {
-            if let submitAfterDictationAppModel {
-                self.submitAfterDictationAppModel = nil
-                submit(using: submitAfterDictationAppModel)
-            }
-            return
-        }
-        guard dictationPhase != .finishing else { return }
-        dictationPhase = .finishing
-        let preparationTask = dictationTask
-        dictationTask = Task { [weak self] in
-            guard let self else { return }
-            await preparationTask?.value
-            guard dictationActive else { return }
-            await dictationController.finish()
-            dictationActive = false
-            volatileDictation = ""
-            committedDictation = ""
-            dictationPhase = .idle
-            dictationTask = nil
-            if let submitAfterDictationAppModel {
-                self.submitAfterDictationAppModel = nil
-                submit(using: submitAfterDictationAppModel)
-            }
+        dictation.finish { [weak self, weak appModel] finished in
+            guard finished, let self, let appModel else { return }
+            submit(using: appModel)
         }
     }
 
     func cancelDictation() {
-        guard dictationActive || dictationPhase != .idle else { return }
-        dictationActive = false
-        dictationTask?.cancel()
-        dictationTask = Task { [weak self] in
-            await self?.dictationController.cancel()
-        }
-        volatileDictation = ""
-        dictationPhase = .idle
-        submitAfterDictationAppModel = nil
-
-        if !committedDictation.isEmpty, draft.hasSuffix(committedDictation) {
-            draft.removeLast(committedDictation.count)
-        }
-        committedDictation = ""
+        dictation.cancel()
     }
 
     private func performScript(
@@ -1083,24 +983,6 @@ final class ThreadDetailModel {
             awaitingAgentStart = false
             turnBeforeSubmissionID = nil
         }
-    }
-
-    private func commitDictatedPhrase(_ phrase: String) {
-        guard dictationActive else { return }
-        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
-        let appended = separator + trimmed
-        draft += appended
-        committedDictation += appended
-        volatileDictation = ""
-    }
-
-    private func finishDictationWithError(_ message: String) {
-        dictationActive = false
-        dictationPhase = .idle
-        volatileDictation = ""
-        dictationError = message
     }
 
     private func performSend(

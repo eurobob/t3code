@@ -94,6 +94,13 @@ live thread detail from `threadEvents`, sending turns, explicit interrupt,
 client-side steering, tap-to-record dictation, project and task creation, task
 organization, and one data-driven spatial window per thread.
 
+New-task descriptions use the same tap-to-record dictation lifecycle as thread
+instructions. Starting a task while recording first finalizes the in-flight
+phrase, then creates the thread from the completed description.
+New tasks default to an isolated worktree. The creation form can instead use the
+current checkout, and worktree tasks expose both their base branch and whether
+to start from the latest origin state.
+
 The task sidebar is flat by default, can optionally group by project, and keeps
 project names subordinate as row pretitles or inert section headers. Completed
 tasks always move into a dedicated section at the bottom, including when the
@@ -266,22 +273,42 @@ dependent, so a timed mid-tool integration test is still required.
 
 ## Dictation
 
-An iPad implementation already exists on branch
-`t3code/build-visionos-dictation-app` in `apps/mobile/modules/t3-dictation`.
-Read it before designing this one. The important parts:
+T3 Vision dictation is a staged, additive pipeline. Apple's SpeechAnalyzer is
+available immediately and owns the microphone capture. WhisperKit preparation
+starts concurrently with app restoration: multilingual Base (about 147 MB)
+first, then compressed Large v3 (about 626 MB). The record control is never
+gated on either model.
 
-- `SpeechAnalyzer` + `SpeechTranscriber` with `.volatileResults`, iOS/visionOS 26+.
-- Volatile results go to a HUD; **finalized** results commit into the draft as
-  you speak. That split is what makes it feel real-time without the text churning.
-- `AnalysisContext.contextualStrings` seeded from the live shell snapshot —
-  project names, thread titles, branch names. This is the difference between
-  usable and unusable for code vocabulary.
-- Cancel rolls back only if the draft still ends with exactly what was appended,
-  so a mid-dictation edit is never eaten.
+The same 16 kHz microphone buffer feeds every tier. System results remain the
+stable live preview for the whole utterance; a severe volatile-result regression
+is ignored instead of clearing the visible text. The best WhisperKit tier
+available at stop makes a final pass, but replaces the system result only when
+its length and vocabulary plausibly agree. Seed WhisperKit with a small, stable
+product vocabulary only. Project and branch vocabulary belongs in
+SpeechAnalyzer's context because feeding it to the Whisper decoder can cause
+branch-name hallucinations.
+
+Large v3 deliberately keeps WhisperKit's CPU+Neural Engine defaults. On the M2
+Vision Pro with visionOS 27, its audio encoder can spend about 151 seconds
+loading or specializing on a development launch. Base remains the usable
+WhisperKit tier during that background wait; do not add a GPU Large stage or a
+duplicate encoder unless new evidence justifies the extra complexity and memory.
+
+Cancel rolls back only if the draft still ends with exactly what dictation
+appended, so a mid-dictation edit is never eaten. The composer continues to
+accept contextual vocabulary even though the current WhisperKit decoder does
+not yet turn it into prompt tokens.
 
 On visionOS dictation is tap once to start and tap again to stop; do not make the
 user hold a pinch for the whole utterance. The voice dock must occupy reserved
 layout space so transcript content never competes with it.
+
+Sending during dictation is intentionally latency-first, but must not dispatch a
+volatile partial result: stop capture immediately, finalize SpeechAnalyzer
+through the end of input, skip the slower Whisper pass, then enter the existing
+optimistic network-send flow. A dispatch failure restores the combined draft.
+Stopping with the microphone is the quality-first path that waits for the
+guarded WhisperKit final pass.
 
 ## Conventions
 

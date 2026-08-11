@@ -19,6 +19,9 @@ packages:
     url: https://github.com/clerk/clerk-ios.git
     minVersion: 0.1.0
     maxVersion: 100.0.0
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    exactVersion: 1.1.0
 
 settings:
   base:
@@ -65,6 +68,8 @@ targets:
       # provider, which is how the iOS client now signs in.
       - package: Clerk
         product: ClerkKitUI
+      - package: ArgmaxOSS
+        product: WhisperKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.t3tools.t3code.vision
@@ -73,7 +78,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "7"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: T3 Vision connects to T3 Code servers on your local network.
-        INFOPLIST_KEY_NSMicrophoneUsageDescription: T3 Vision uses the microphone for push-to-talk task dictation.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: T3 Vision uses the microphone to dictate task descriptions and instructions.
         INFOPLIST_KEY_NSScreenCaptureUsageDescription: T3 Vision captures user-selected shared content as an image attachment.
     info:
       path: Info.plist
@@ -81,6 +86,8 @@ targets:
         # An active recording starts while T3 Vision is visible, then continues
         # when visionOS hides its windows for another app's immersive space.
         UIBackgroundModes: [audio, screen-capture]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         T3ConnectClerkPublishableKey: $(T3CODE_CLERK_PUBLISHABLE_KEY)
