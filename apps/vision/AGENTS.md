@@ -206,10 +206,13 @@ client because the server has no thread-order command.
 The client now targets visionOS 27 and requires Xcode 27 so its ScreenCaptureKit
 shared-content picker compiles directly, without a visionOS 26 fallback. Image
 attachments support Photos, Files, and full-display screenshots. The screenshot
-flow opens a separate movable shutter window after sharing begins; choosing its
-three- or five-second action dismisses that window before an audible countdown,
-captures the latest frame, stops sharing, and returns the image to the originating
-composer. The five-second path leaves time to enter an immersive app. The
+flow opens a separate movable shutter window after sharing begins. Its primary
+action dismisses the shutter and captures immediately; the five-second action
+leaves time to enter an immersive app. Capture stops sharing and returns the image
+to the originating composer. Draft thumbnails can open a separate visionOS 27
+PaperKit annotation window, and the shutter can opt into opening that editor after
+every capture. Saving flattens the system drawing tools into a replacement image
+with the same draft attachment identity. The
 window-specific ScreenCaptureKit picker must not be offered because visionOS 27
 reports that selection style as unsupported at runtime.
 The earlier visionOS 26 implementation passed a device build and was installed and

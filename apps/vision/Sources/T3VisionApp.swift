@@ -4,12 +4,14 @@ import SwiftUI
 struct T3VisionApp: App {
     @State private var model = AppModel()
     @State private var screenCapture = VisionScreenCaptureController()
+    @State private var imageAnnotation = VisionImageAnnotationController()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
                 .environment(screenCapture)
+                .environment(imageAnnotation)
                 .task { await model.restore() }
                 .task { await VisionWhisperKitService.shared.prepareIfNeeded() }
         }
@@ -31,6 +33,7 @@ struct T3VisionApp: App {
             }
             .environment(model)
             .environment(screenCapture)
+            .environment(imageAnnotation)
         }
         .defaultSize(width: 820, height: 780)
 
@@ -40,6 +43,12 @@ struct T3VisionApp: App {
         }
         .defaultSize(width: 360, height: 220)
         .windowResizability(.contentSize)
+
+        Window("Annotate Image", id: VisionImageAnnotationController.windowID) {
+            VisionImageAnnotationView()
+                .environment(imageAnnotation)
+        }
+        .defaultSize(width: 1_100, height: 760)
     }
 }
 

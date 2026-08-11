@@ -32,6 +32,7 @@ struct VisionDraftAttachment: Identifiable, Sendable, Equatable {
 
 struct VisionImageAttachmentPicker: View {
     @SwiftUI.Environment(VisionScreenCaptureController.self) private var screenCapture
+    @SwiftUI.Environment(VisionImageAnnotationController.self) private var imageAnnotation
     @SwiftUI.Environment(\.openWindow) private var openWindow
 
     @Binding var attachments: [VisionDraftAttachment]
@@ -183,7 +184,12 @@ struct VisionImageAttachmentPicker: View {
                 Task {
                     defer { isPreparing = false }
                     do {
-                        try await append(data, ordinal: attachments.count + 1)
+                        if let attachment = try await append(
+                            data,
+                            ordinal: attachments.count + 1
+                        ), screenCapture.annotateAfterCapture {
+                            beginAnnotation(attachment)
+                        }
                     } catch {
                         errorMessage = error.localizedDescription
                     }
@@ -198,12 +204,23 @@ struct VisionImageAttachmentPicker: View {
         )
     }
 
-    private func append(_ data: Data, ordinal: Int) async throws {
+    private func append(_ data: Data, ordinal: Int) async throws -> VisionDraftAttachment? {
         let attachment = try await Task.detached(priority: .userInitiated) {
             try VisionImageProcessor.attachment(from: data, ordinal: ordinal)
         }.value
-        guard attachments.count < 8 else { return }
+        guard attachments.count < 8 else { return nil }
         attachments.append(attachment)
+        return attachment
+    }
+
+    private func beginAnnotation(_ attachment: VisionDraftAttachment) {
+        imageAnnotation.begin(attachment: attachment) { replacement in
+            guard let index = attachments.firstIndex(where: { $0.id == replacement.id }) else {
+                return
+            }
+            attachments[index] = replacement
+        }
+        openWindow(id: VisionImageAnnotationController.windowID)
     }
 }
 
@@ -212,6 +229,7 @@ struct VisionScreenCaptureUtilityView: View {
     @SwiftUI.Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        @Bindable var controller = controller
         VStack(alignment: .leading, spacing: 16) {
             Label("Screenshot ready", systemImage: "camera.viewfinder")
                 .font(.headline)
@@ -221,11 +239,13 @@ struct VisionScreenCaptureUtilityView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
-                Button("Take Screenshot") { startCountdown(seconds: 3) }
+                Button("Take Screenshot") { takeScreenshot() }
                     .buttonStyle(.borderedProminent)
                 Button("5 Seconds") { startCountdown(seconds: 5) }
                     .buttonStyle(.bordered)
             }
+
+            Toggle("Annotate after capture", isOn: $controller.annotateAfterCapture)
 
             Button("Cancel", role: .cancel) {
                 controller.cancel()
@@ -255,9 +275,22 @@ struct VisionScreenCaptureUtilityView: View {
             controller.captureAfter(seconds: seconds)
         }
     }
+
+    private func takeScreenshot() {
+        let controller = controller
+        dismiss()
+        Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            controller.captureNow()
+        }
+    }
 }
 
 struct VisionAttachmentStrip: View {
+    @SwiftUI.Environment(VisionImageAnnotationController.self) private var imageAnnotation
+    @SwiftUI.Environment(\.openWindow) private var openWindow
+
     @Binding var attachments: [VisionDraftAttachment]
 
     var body: some View {
@@ -284,6 +317,19 @@ struct VisionAttachmentStrip: View {
                             .buttonStyle(.plain)
                             .offset(x: 8, y: -8)
                             .accessibilityLabel("Remove \(attachment.filename)")
+
+                            Button {
+                                beginAnnotation(attachment)
+                            } label: {
+                                Image(systemName: "pencil.tip")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.white)
+                                    .frame(width: 24, height: 24)
+                                    .background(.blue.opacity(0.9), in: Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 8, y: 40)
+                            .accessibilityLabel("Annotate \(attachment.filename)")
                         }
                         .padding(.top, 8)
                         .padding(.trailing, 8)
@@ -293,6 +339,16 @@ struct VisionAttachmentStrip: View {
             .scrollIndicators(.hidden)
             .accessibilityLabel("\(attachments.count) image attachments")
         }
+    }
+
+    private func beginAnnotation(_ attachment: VisionDraftAttachment) {
+        imageAnnotation.begin(attachment: attachment) { replacement in
+            guard let index = attachments.firstIndex(where: { $0.id == replacement.id }) else {
+                return
+            }
+            attachments[index] = replacement
+        }
+        openWindow(id: VisionImageAnnotationController.windowID)
     }
 }
 
@@ -465,6 +521,20 @@ enum VisionImageProcessor {
             thumbnailData: thumbnail,
             filename: "Image \(ordinal).jpg",
             mimeType: "image/jpeg"
+        )
+    }
+
+    static func replacement(
+        from sourceData: Data,
+        for attachment: VisionDraftAttachment
+    ) throws -> VisionDraftAttachment {
+        let prepared = try self.attachment(from: sourceData, ordinal: 1)
+        return VisionDraftAttachment(
+            id: attachment.id,
+            data: prepared.data,
+            thumbnailData: prepared.thumbnailData,
+            filename: attachment.filename,
+            mimeType: prepared.mimeType
         )
     }
 

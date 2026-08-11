@@ -49,6 +49,7 @@ final class VisionScreenCaptureController {
     }
 
     private(set) var phase = Phase.idle
+    var annotateAfterCapture = false
 
     @ObservationIgnored
     private var session: VisionScreenCaptureSession?
