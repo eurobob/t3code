@@ -20,10 +20,12 @@ plausibly agrees with the streaming transcript; otherwise it keeps the system
 result instead of replacing valid speech with a hallucination.
 
 Select the microphone again when you want WhisperKit to refine the transcript
-before editing it. Select Send while recording for the latency-first path: T3
-immediately stops recording, asks the system recognizer to finalize through the
-end of the captured audio, skips the slower WhisperKit pass, and then sends.
-Network dispatch remains optimistic; a failure restores the exact combined
+before editing it. Select Send while recording to commit the message
+immediately: the controls disable, the composer collapses, and the current
+system transcript moves into a pending user bubble. T3 then stops recording and
+runs the same quality-first WhisperKit pass. If that pass produces a better
+result, the pending bubble updates before T3 dispatches the final text. A
+network failure removes the pending bubble and restores the exact combined
 draft so it can be retried or edited.
 
 The first WhisperKit upgrade downloads roughly 147 MB; the later Large v3
