@@ -17,7 +17,6 @@ private enum VisionSelection: Hashable {
 
 struct ThreadListView: View {
     @SwiftUI.Environment(AppModel.self) private var model
-    @SwiftUI.Environment(\.openWindow) private var openWindow
 
     @AppStorage("vision.tasks.groupByProject") private var groupByProject = false
     @State private var selection: VisionSelection?
